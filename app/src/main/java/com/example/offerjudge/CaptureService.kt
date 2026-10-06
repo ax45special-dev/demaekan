@@ -1,20 +1,27 @@
 package com.example.offerjudge
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.location.Geocoder
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -22,9 +29,13 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import java.util.Calendar
+import java.util.Locale
+import java.util.concurrent.Executors
+import kotlin.math.abs
 
 class CaptureService : Service() {
 
@@ -40,6 +51,7 @@ class CaptureService : Service() {
         private const val GOOD_PER_HOUR = 1500 // これ以上なら 🟢受ける
         private const val OK_PER_HOUR = 1100   // これ以上なら 🟡微妙、未満は 🔴見送り
         private const val DEBUG = false        // trueにすると読み取った文字も表示
+        private const val ROAD_FACTOR = 1.3    // 直線距離 → 道のりの概算倍率
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -51,6 +63,21 @@ class CaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var overlay: TextView? = null
     private var busy = false
+
+    // 現在地
+    private var here: Location? = null
+    private val locListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) { here = location }
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) {}
+        @Deprecated("Deprecated in Java")
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+    }
+
+    // 住所 → 緯度経度（null = 見つからない）
+    private val geoCache = HashMap<String, Location?>()
+    private val geoPending = HashSet<String>()
+    private val geoThread = Executors.newSingleThreadExecutor()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -67,6 +94,7 @@ class CaptureService : Service() {
         if (data == null || projection != null) return START_NOT_STICKY
 
         showOverlay()
+        startLocation()
 
         val mpm = getSystemService(MediaProjectionManager::class.java)
         projection = mpm.getMediaProjection(code, data).also {
@@ -88,7 +116,9 @@ class CaptureService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .build()
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            if (hasLocationPermission()) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            startForeground(1, n, type)
         } else {
             startForeground(1, n)
         }
@@ -169,7 +199,7 @@ class CaptureService : Service() {
 
         busy = true
         recognizer.process(InputImage.fromBitmap(bmp, 0))
-            .addOnSuccessListener { showResult(it.text) }
+            .addOnSuccessListener { showResult(it) }
             .addOnFailureListener { overlay?.text = "OCRエラー: ${it.message}" }
             .addOnCompleteListener { busy = false }
     }
@@ -193,8 +223,9 @@ class CaptureService : Service() {
         return total > 0 && dark.toDouble() / total > 0.95
     }
 
-    private fun showResult(text: String) {
+    private fun showResult(result: Text) {
         val tv = overlay ?: return
+        val text = result.text
         val flat = text.replace('\n', ' ')
 
         // オファー画面かどうか
@@ -233,9 +264,77 @@ class CaptureService : Service() {
             append(label).append('\n')
             append("${yen}円 / ${km}km").append('\n')
             if (minutes != null) append("お届けまで${minutes}分 → 時給${perHour}円").append('\n')
-            append("距離単価 ${perKm}円/km（回送除く）")
+            append("距離単価 ${perKm}円/km（回送除く）").append('\n')
+            append(deadheadLine(result, yen, km))
             if (DEBUG) append("\n").append(flat.take(150))
         }
+    }
+
+    private fun hasLocationPermission() =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun startLocation() {
+        if (!hasLocationPermission()) return
+        val lm = getSystemService(LocationManager::class.java)
+        for (p in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            try {
+                if (!lm.isProviderEnabled(p)) continue
+                lm.getLastKnownLocation(p)?.let { last ->
+                    val cur = here
+                    if (cur == null || last.time > cur.time) here = last
+                }
+                lm.requestLocationUpdates(p, 5000L, 10f, locListener, Looper.getMainLooper())
+            } catch (e: SecurityException) {
+            } catch (e: IllegalArgumentException) {
+            }
+        }
+    }
+
+    // 「受取」の近くにある住所 = お店の住所
+    private val addressRe = Regex("""\S{1,5}[市区郡]\S*[0-9０-９]""")
+
+    private fun findStoreAddress(result: Text): String? {
+        val lines = result.textBlocks.flatMap { it.lines }
+            .map { (it.text.replace(" ", "").replace("　", "")) to (it.boundingBox?.centerY() ?: 0) }
+        val addrs = lines.filter { addressRe.containsMatchIn(it.first) }
+        if (addrs.isEmpty()) return null
+        val pickup = lines.firstOrNull { it.first.contains("受取") }
+            ?: return addrs.minByOrNull { it.second }?.first
+        return addrs.minByOrNull { abs(it.second - pickup.second) }?.first
+    }
+
+    private fun geocode(addr: String): Location? {
+        if (geoCache.containsKey(addr)) return geoCache[addr]
+        if (geoPending.add(addr)) {
+            geoThread.execute {
+                try {
+                    @Suppress("DEPRECATION")
+                    val a = Geocoder(this, Locale.JAPAN).getFromLocationName(addr, 1)?.firstOrNull()
+                    val loc = a?.let { Location("geo").apply { latitude = it.latitude; longitude = it.longitude } }
+                    main.post { geoCache[addr] = loc; geoPending.remove(addr) }
+                } catch (e: Exception) {
+                    main.post { geoPending.remove(addr) } // 通信エラーなどは次回やり直す
+                }
+            }
+        }
+        return null
+    }
+
+    private fun deadheadLine(result: Text, yen: Int, km: Double): String {
+        val addr = findStoreAddress(result) ?: return "回送: 受取住所が読めません"
+        val cur = here ?: return "回送: 現在地不明（位置情報の許可を確認）"
+        if (!Geocoder.isPresent()) return "回送: この端末は住所検索に未対応"
+        val store = geocode(addr) ?: return if (geoPending.contains(addr)) {
+            "回送: 計算中…"
+        } else {
+            "回送: 住所が見つかりません\n(${addr.take(20)})"
+        }
+        val dead = cur.distanceTo(store) / 1000.0 * ROAD_FACTOR
+        val total = dead + km
+        val perTotal = if (total > 0) (yen / total).toInt() else 0
+        return String.format(Locale.JAPAN, "回送 約%.1fkm → 合計%.1fkm（%d円/km）", dead, total, perTotal) +
+            "\n受取: " + addr.take(20)
     }
 
     // 地図上の「21:06」「21:31」などから、今からお届け時刻までの分数を出す
@@ -254,6 +353,8 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacks(loop)
+        getSystemService(LocationManager::class.java).removeUpdates(locListener)
+        geoThread.shutdown()
         virtualDisplay?.release()
         imageReader?.close()
         val p = projection

@@ -69,9 +69,12 @@ class MainActivity : Activity() {
             }
         }
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-        }
+        val perms = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= 33) perms += Manifest.permission.POST_NOTIFICATIONS
+        requestPermissions(perms.toTypedArray(), 1)
 
         setContentView(layout)
     }
