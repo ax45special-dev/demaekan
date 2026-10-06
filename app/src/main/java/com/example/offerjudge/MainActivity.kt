@@ -58,6 +58,17 @@ class MainActivity : Activity() {
             stopService(Intent(this, CaptureService::class.java))
         }
 
+        addButton("最後のオファーの読み取り文字を共有") {
+            val text = getSharedPreferences(CaptureService.PREFS, MODE_PRIVATE)
+                .getString(CaptureService.KEY_LAST_OFFER, null)
+            if (text == null) {
+                Toast.makeText(this, "まだオファーを読み取っていません", Toast.LENGTH_SHORT).show()
+            } else {
+                val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                startActivity(Intent.createChooser(send, "読み取り文字を共有"))
+            }
+        }
+
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }

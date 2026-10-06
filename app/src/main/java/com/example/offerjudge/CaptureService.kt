@@ -31,6 +31,8 @@ class CaptureService : Service() {
     companion object {
         const val EXTRA_CODE = "code"
         const val EXTRA_DATA = "data"
+        const val PREFS = "offer"
+        const val KEY_LAST_OFFER = "last_offer_text"
         private const val CHANNEL = "capture"
         private const val INTERVAL_MS = 1000L
 
@@ -197,7 +199,10 @@ class CaptureService : Service() {
 
         // オファー画面かどうか
         val isOffer = flat.contains("自動拒否") || flat.contains("シングル") || flat.contains("ダブル")
-        if (!isOffer) {
+        if (isOffer) {
+            // 最後に読んだオファー画面の文字を保存（メイン画面の「共有」ボタンで送れる）
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_OFFER, text).apply()
+        } else {
             tv.setBackgroundColor(Color.argb(150, 0, 0, 0))
             tv.text = if (DEBUG) "待機中\n" + flat.take(150) else "待機中"
             return
