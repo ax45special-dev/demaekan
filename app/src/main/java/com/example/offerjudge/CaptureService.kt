@@ -24,6 +24,7 @@ import android.widget.TextView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
+import java.util.Calendar
 
 class CaptureService : Service() {
 
@@ -32,6 +33,11 @@ class CaptureService : Service() {
         const val EXTRA_DATA = "data"
         private const val CHANNEL = "capture"
         private const val INTERVAL_MS = 1000L
+
+        // ===== 判定基準（ここを自分用に変えてください）=====
+        private const val GOOD_PER_HOUR = 1500 // これ以上なら 🟢受ける
+        private const val OK_PER_HOUR = 1100   // これ以上なら 🟡微妙、未満は 🔴見送り
+        private const val DEBUG = false        // trueにすると読み取った文字も表示
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -89,7 +95,7 @@ class CaptureService : Service() {
     private fun showOverlay() {
         val tv = TextView(this).apply {
             text = "待機中…"
-            textSize = 12f
+            textSize = 15f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.argb(200, 0, 0, 0))
             setPadding(16, 12, 16, 12)
@@ -186,18 +192,59 @@ class CaptureService : Service() {
     }
 
     private fun showResult(text: String) {
-        val yen = Regex("""[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円""").findAll(text)
-            .map { m -> m.groupValues[1].ifEmpty { m.groupValues[2] } }
-            .toList()
-        val km = Regex("""([0-9]+(?:\.[0-9]+)?)\s*(?:km|KM|Km|ｋｍ)""").findAll(text)
-            .map { it.groupValues[1] }
-            .toList()
-        overlay?.text = buildString {
-            append("💴 ").append(if (yen.isEmpty()) "-" else yen.joinToString(" / ")).append('\n')
-            append("📍 ").append(if (km.isEmpty()) "-" else km.joinToString(" / ") + " km").append('\n')
-            append("――読み取り文字――\n")
-            append(text.replace('\n', ' ').take(150))
+        val tv = overlay ?: return
+        val flat = text.replace('\n', ' ')
+
+        // オファー画面かどうか
+        val isOffer = flat.contains("自動拒否") || flat.contains("シングル") || flat.contains("ダブル")
+        if (!isOffer) {
+            tv.setBackgroundColor(Color.argb(150, 0, 0, 0))
+            tv.text = if (DEBUG) "待機中\n" + flat.take(150) else "待機中"
+            return
         }
+
+        // 「506円 / 1.5km」を読む
+        val m = Regex("""([0-9][0-9,]*)\s*円\s*[/／]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:km|KM|Km|ｋｍ)""").find(flat)
+        if (m == null) {
+            tv.setBackgroundColor(Color.argb(220, 90, 90, 90))
+            tv.text = "オファー検出\n金額・距離が読めません" + if (DEBUG) "\n" + flat.take(150) else ""
+            return
+        }
+        val yen = m.groupValues[1].replace(",", "").toIntOrNull() ?: 0
+        val km = m.groupValues[2].toDoubleOrNull() ?: 0.0
+        val minutes = minutesToDelivery(flat)
+        val perHour = minutes?.let { yen * 60 / it }
+        val perKm = if (km > 0) (yen / km).toInt() else 0
+
+        val (label, color) = when {
+            perHour == null -> "⚪ 時間不明" to Color.argb(220, 90, 90, 90)
+            perHour >= GOOD_PER_HOUR -> "🟢 受ける" to Color.argb(230, 20, 140, 60)
+            perHour >= OK_PER_HOUR -> "🟡 微妙" to Color.argb(230, 190, 140, 0)
+            else -> "🔴 見送り" to Color.argb(230, 190, 30, 30)
+        }
+
+        tv.setBackgroundColor(color)
+        tv.text = buildString {
+            append(label).append('\n')
+            append("${yen}円 / ${km}km").append('\n')
+            if (minutes != null) append("お届けまで${minutes}分 → 時給${perHour}円").append('\n')
+            append("距離単価 ${perKm}円/km（回送除く）")
+            if (DEBUG) append("\n").append(flat.take(150))
+        }
+    }
+
+    // 地図上の「21:06」「21:31」などから、今からお届け時刻までの分数を出す
+    private fun minutesToDelivery(text: String): Int? {
+        val cal = Calendar.getInstance()
+        val now = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        return Regex("""(?<![0-9])([0-2]?[0-9]):([0-5][0-9])""").findAll(text)
+            .mapNotNull { mm ->
+                val h = mm.groupValues[1].toInt()
+                val mi = mm.groupValues[2].toInt()
+                if (h > 23) null else ((h * 60 + mi - now) % 1440 + 1440) % 1440
+            }
+            .filter { it in 1..120 } // ステータスバーの時計(8:57など)は除外される
+            .maxOrNull()             // 一番遅い時刻 = お届け予定
     }
 
     override fun onDestroy() {
