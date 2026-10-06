@@ -74,6 +74,11 @@ class CaptureService : Service() {
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     }
 
+    // 表示中のオファー（ちらつき防止のため、一度読めた値を保持する）
+    private var offerKey: String? = null
+    private var deliveryAt: Int? = null // お届け時刻（0時からの分）
+    private var missFrames = 0
+
     // 住所 → 緯度経度（null = 見つからない）
     private val geoCache = HashMap<String, Location?>()
     private val geoPending = HashSet<String>()
@@ -127,12 +132,12 @@ class CaptureService : Service() {
     private fun showOverlay() {
         val tv = TextView(this).apply {
             text = "待機中…"
-            textSize = 15f
+            textSize = 13f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.argb(200, 0, 0, 0))
-            setPadding(16, 12, 16, 12)
-            maxLines = 10
-            maxWidth = (resources.displayMetrics.widthPixels * 0.7).toInt()
+            setPadding(16, 6, 16, 6)
+            maxLines = 2
+            maxWidth = (resources.displayMetrics.widthPixels * 0.95).toInt()
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -140,14 +145,14 @@ class CaptureService : Service() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             // NOT_TOUCHABLE: 下のアプリの操作を邪魔しない
             // SECURE: 自分の表示をキャプチャに写さない（OCRが自分の文字を読まないように）
+            //   ※キャプチャ上ではこの部分が黒く抜けるので、小さく・画面上端に置く
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 16
-            y = 200
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 0
         }
         getSystemService(WindowManager::class.java).addView(tv, params)
         overlay = tv
@@ -230,27 +235,37 @@ class CaptureService : Service() {
 
         // オファー画面かどうか
         val isOffer = flat.contains("自動拒否") || flat.contains("シングル") || flat.contains("ダブル")
-        if (isOffer) {
-            // 最後に読んだオファー画面の文字を保存（メイン画面の「共有」ボタンで送れる）
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_OFFER, text).apply()
-        } else {
+        if (!isOffer) {
+            // 一瞬読めなかっただけなら表示を保つ
+            if (offerKey != null && ++missFrames < 3) return
+            offerKey = null
+            deliveryAt = null
             tv.setBackgroundColor(Color.argb(150, 0, 0, 0))
-            tv.text = if (DEBUG) "待機中\n" + flat.take(150) else "待機中"
+            tv.text = if (DEBUG) "待機中 " + flat.take(80) else "待機中"
             return
         }
+        missFrames = 0
+        // 最後に読んだオファー画面の文字を保存（メイン画面の「共有」ボタンで送れる）
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_OFFER, text).apply()
 
         // 「506円 / 1.5km」を読む
         val m = Regex("""([0-9][0-9,]*)\s*円\s*[/／]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:km|KM|Km|ｋｍ)""").find(flat)
         if (m == null) {
+            if (offerKey != null) return // 前の表示を保つ
             tv.setBackgroundColor(Color.argb(220, 90, 90, 90))
-            tv.text = "オファー検出\n金額・距離が読めません" + if (DEBUG) "\n" + flat.take(150) else ""
+            tv.text = "オファー検出：金額・距離が読めません"
             return
         }
         val yen = m.groupValues[1].replace(",", "").toIntOrNull() ?: 0
         val km = m.groupValues[2].toDoubleOrNull() ?: 0.0
-        val minutes = minutesToDelivery(flat)
+        val key = "$yen/$km"
+        if (key != offerKey) {
+            offerKey = key
+            deliveryAt = null
+        }
+        if (deliveryAt == null) deliveryAt = deliveryTime(result)
+        val minutes = deliveryAt?.let { minutesUntil(it) }?.takeIf { it in 1..180 }
         val perHour = minutes?.let { yen * 60 / it }
-        val perKm = if (km > 0) (yen / km).toInt() else 0
 
         val (label, color) = when {
             perHour == null -> "⚪ 時間不明" to Color.argb(220, 90, 90, 90)
@@ -258,15 +273,18 @@ class CaptureService : Service() {
             perHour >= OK_PER_HOUR -> "🟡 微妙" to Color.argb(230, 190, 140, 0)
             else -> "🔴 見送り" to Color.argb(230, 190, 30, 30)
         }
+        val storeAddr = findStoreAddress(result)
+        val town = storeAddr?.substringAfter("市", "")?.take(5).orEmpty()
 
         tv.setBackgroundColor(color)
         tv.text = buildString {
-            append(label).append('\n')
-            append("${yen}円 / ${km}km").append('\n')
-            if (minutes != null) append("お届けまで${minutes}分 → 時給${perHour}円").append('\n')
-            append("距離単価 ${perKm}円/km（回送除く）").append('\n')
-            append(deadheadLine(result, yen, km))
-            if (DEBUG) append("\n").append(flat.take(150))
+            append(label)
+            if (perHour != null) append(" 時給${perHour}円")
+            if (town.isNotEmpty()) append(" (受取:").append(town).append(')')
+            append('\n')
+            append("${yen}円/${km}km")
+            if (minutes != null) append(" ${minutes}分")
+            append(" | ").append(deadhead(storeAddr, yen, km))
         }
     }
 
@@ -291,14 +309,16 @@ class CaptureService : Service() {
         }
     }
 
-    // 「受取」の近くにある住所 = お店の住所
+    // お店の住所：都道府県から書かれている方（お届け先は市から始まる）。なければ「受取」に近い方
     private val addressRe = Regex("""\S{1,5}[市区郡]\S*[0-9０-９]""")
+    private val prefRe = Regex("""[都道府県]\S*[市区郡]""")
 
     private fun findStoreAddress(result: Text): String? {
         val lines = result.textBlocks.flatMap { it.lines }
             .map { (it.text.replace(" ", "").replace("　", "")) to (it.boundingBox?.centerY() ?: 0) }
         val addrs = lines.filter { addressRe.containsMatchIn(it.first) }
         if (addrs.isEmpty()) return null
+        addrs.firstOrNull { prefRe.containsMatchIn(it.first) }?.let { return it.first }
         val pickup = lines.firstOrNull { it.first.contains("受取") }
             ?: return addrs.minByOrNull { it.second }?.first
         return addrs.minByOrNull { abs(it.second - pickup.second) }?.first
@@ -321,34 +341,52 @@ class CaptureService : Service() {
         return null
     }
 
-    private fun deadheadLine(result: Text, yen: Int, km: Double): String {
-        val addr = findStoreAddress(result) ?: return "回送: 受取住所が読めません"
-        val cur = here ?: return "回送: 現在地不明（位置情報の許可を確認）"
-        if (!Geocoder.isPresent()) return "回送: この端末は住所検索に未対応"
-        val store = geocode(addr) ?: return if (geoPending.contains(addr)) {
-            "回送: 計算中…"
-        } else {
-            "回送: 住所が見つかりません\n(${addr.take(20)})"
-        }
+    private fun deadhead(addr: String?, yen: Int, km: Double): String {
+        if (addr == null) return "回送:住所読めず"
+        val cur = here ?: return "回送:現在地不明"
+        if (!Geocoder.isPresent()) return "回送:住所検索非対応"
+        val store = geocode(addr) ?: return if (geoPending.contains(addr)) "回送:計算中" else "回送:住所不明"
         val dead = cur.distanceTo(store) / 1000.0 * ROAD_FACTOR
         val total = dead + km
         val perTotal = if (total > 0) (yen / total).toInt() else 0
-        return String.format(Locale.JAPAN, "回送 約%.1fkm → 合計%.1fkm（%d円/km）", dead, total, perTotal) +
-            "\n受取: " + addr.take(20)
+        return String.format(Locale.JAPAN, "回送%.1fkm 計%.1fkm %d円/km", dead, total, perTotal)
     }
 
-    // 地図上の「21:06」「21:31」などから、今からお届け時刻までの分数を出す
-    private fun minutesToDelivery(text: String): Int? {
+    private val timeRe = Regex("""(?<![0-9])([0-2]?[0-9]):([0-5][0-9])""")
+
+    private fun nowMinute(): Int {
         val cal = Calendar.getInstance()
-        val now = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-        return Regex("""(?<![0-9])([0-2]?[0-9]):([0-5][0-9])""").findAll(text)
-            .mapNotNull { mm ->
+        return cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+    }
+
+    private fun minutesUntil(t: Int) = ((t - nowMinute()) % 1440 + 1440) % 1440
+
+    // 地図上の「お届け」の近くにある時刻 = お届け予定（0時からの分）。
+    // 見つからなければ、2時間以内で一番遅い時刻を使う
+    private fun deliveryTime(result: Text): Int? {
+        val lines = result.textBlocks.flatMap { it.lines }
+        val allTimes = lines.flatMap { line ->
+            val box = line.boundingBox
+            timeRe.findAll(line.text).mapNotNull { mm ->
                 val h = mm.groupValues[1].toInt()
                 val mi = mm.groupValues[2].toInt()
-                if (h > 23) null else ((h * 60 + mi - now) % 1440 + 1440) % 1440
-            }
-            .filter { it in 1..120 } // ステータスバーの時計(8:57など)は除外される
-            .maxOrNull()             // 一番遅い時刻 = お届け予定
+                if (h > 23) null else Triple(h * 60 + mi, box?.centerX() ?: 0, box?.centerY() ?: 0)
+            }.toList()
+        }
+        val times = allTimes.filter { minutesUntil(it.first) in 1..120 } // ステータスバーの時計などは除外
+        fun nearest(list: List<Triple<Int, Int, Int>>, box: android.graphics.Rect) = list.minByOrNull {
+            val dx = (it.second - box.centerX()).toDouble()
+            val dy = (it.third - box.centerY()).toDouble()
+            dx * dx + dy * dy
+        }
+        // 「受取」の時刻より後のものだけをお届け候補にする（受取時刻を誤って使わないように）
+        val pickup = lines.firstOrNull { it.text.contains("受取") }?.boundingBox?.let { nearest(allTimes, it) }
+        val cands = if (pickup == null) times
+            else times.filter { minutesUntil(it.first) > minutesUntil(pickup.first) }
+        if (cands.isEmpty()) return null
+        val label = lines.firstOrNull { it.text.contains("お届け") }?.boundingBox
+        if (label != null) return nearest(cands, label)?.first
+        return cands.maxByOrNull { minutesUntil(it.first) }?.first
     }
 
     override fun onDestroy() {
