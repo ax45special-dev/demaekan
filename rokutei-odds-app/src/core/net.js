@@ -1,6 +1,6 @@
 // 公式サイトへのアクセス(1件ずつ・間隔を空けて・拒否されたら止まる)と、その日のレース一覧の取得。
-export class StopRun extends Error {} // この回の取得を、即座に止める(混雑・拒否・形式変更の疑い等)
-export class PageError extends Error {} // 1ページの取得に失敗(再試行しても駄目だった通信エラー等)
+export class StopRun extends Error {} // この回の取得を、即座に止める(公式サイトの拒否 403/429、robots.txt の禁止)
+export class PageError extends Error {} // 1ページの取得に失敗(再試行しても駄目だった通信エラー等)。busy=true は 503 が続いた時
 
 export const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,8 +42,8 @@ export function canFetch(robots, path) {
 }
 
 export class Fetcher {
-  constructor(cfg, { fetchFn = globalThis.fetch, sleep = realSleep, now = () => Date.now(), rng = Math.random } = {}) {
-    this.cfg = cfg; this.fetchFn = fetchFn; this._sleep = sleep; this._now = now; this._rng = rng;
+  constructor(cfg, { fetchFn = globalThis.fetch, sleep = realSleep, now = () => Date.now(), rng = Math.random, onNotice = null } = {}) {
+    this.cfg = cfg; this.fetchFn = fetchFn; this._sleep = sleep; this._now = now; this._rng = rng; this.onNotice = onNotice;
     this._last = null; this.requests = 0; this._robots = null;
   }
   async _wait() {
@@ -56,34 +56,49 @@ export class Fetcher {
     }
     this._last = this._now();
   }
+  // robots.txt を読む。通信エラー・5xx は、間隔を広げて最大3回まで試す(一時的な不調で、その回を止めないため)。
   async checkRobots() {
     if (!this.cfg.respect_robots) return;
     const url = this.cfg.base_url.replace(/\/$/, "") + "/robots.txt";
-    let r;
-    try { r = await httpGet(this.fetchFn, url, { "User-Agent": this.cfg.user_agent }, 30000); }
-    catch (e) { throw new StopRun("robots.txt を読めませんでした(" + (e.message || e) + ")"); }
-    if (r.status === 404 || r.status === 410) this._robots = { rules: [] };
-    else if (!r.ok) throw new StopRun(`robots.txt を読めませんでした(HTTP ${r.status})`);
-    else this._robots = parseRobots(r.text, this.cfg.user_agent);
+    let last = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await this._sleep(60000 * attempt);
+      let r;
+      try { r = await httpGet(this.fetchFn, url, { "User-Agent": this.cfg.user_agent }, 30000); }
+      catch (e) { last = String(e.message || e); continue; }
+      if (r.status === 404 || r.status === 410) { this._robots = { rules: [] }; return; }
+      if (r.status === 403 || r.status === 429) throw new StopRun(`robots.txt で HTTP ${r.status} が返りました(拒否の可能性)`);
+      if (r.ok) { this._robots = parseRobots(r.text, this.cfg.user_agent); return; }
+      last = "HTTP " + r.status;
+    }
+    throw new StopRun("robots.txt を読めませんでした(" + last + ")");
   }
   async get(path) {
     const url = this.cfg.base_url.replace(/\/$/, "") + path;
     if (this._robots && !canFetch(this._robots, path.split("?")[0])) throw new StopRun("robots.txt がこのページを禁止しています: " + path);
-    let last = "";
-    for (let attempt = 0; attempt < 3; attempt++) {
+    let last = "", busy = 0;
+    for (let attempt = 0; attempt < 3;) {
       await this._wait();
       this.requests++;
-      try {
-        const r = await httpGet(this.fetchFn, url, { "User-Agent": this.cfg.user_agent, "Accept-Language": "ja" }, 30000);
+      let r = null;
+      try { r = await httpGet(this.fetchFn, url, { "User-Agent": this.cfg.user_agent, "Accept-Language": "ja" }, 30000); }
+      catch (e) { last = String(e.message || e); }
+      if (r) {
         if (r.status === 404) return { status: 404, text: "" };
-        if ([403, 429, 503].includes(r.status)) throw new StopRun(`公式サイトが HTTP ${r.status} を返しました(混雑または拒否の可能性)。時間を置いてください`);
+        // 403/429 は「拒否・取りすぎ」の合図。再試行せず、その回を止める(サイトポリシーのため、ここは止める)
+        if (r.status === 403 || r.status === 429) throw new StopRun(`公式サイトが HTTP ${r.status} を返しました(拒否の可能性)。時間を置いてください`);
+        // 503 は混雑・保守中。止めずに、長く待ってから試す。続くなら、このページは失敗(busy)として返す
+        if (r.status === 503) {
+          if (++busy > this.cfg.busy_retries) { const e = new PageError(`HTTP 503(混雑)が続きました: ${path}`); e.busy = true; throw e; }
+          this.onNotice?.(`公式サイトが混雑しています(HTTP 503)。${Math.round(this.cfg.busy_wait_sec / 60)}分待ってから、もう一度試します(${busy}/${this.cfg.busy_retries})`);
+          await this._sleep(this.cfg.busy_wait_sec * 1000);
+          continue;
+        }
         if (r.ok) return { status: r.status, text: r.text };
         last = "HTTP " + r.status;
-      } catch (e) {
-        if (e instanceof StopRun) throw e;
-        last = String(e.message || e);
       }
-      if (attempt < 2) await this._sleep(30000 * (attempt + 1)); // 通信エラー・一時的な5xxは、最大2回まで待って再試行
+      attempt++;
+      if (attempt < 3) await this._sleep(30000 * attempt); // 通信エラー・その他の5xxは、最大2回まで待って再試行
     }
     throw new PageError(`取得に失敗しました(${last}): ${path}`);
   }

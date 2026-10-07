@@ -63,17 +63,53 @@ test("間隔: どのリクエストの前にも2.4秒以上(設定3秒の0.8倍)
 
 test("間隔が3秒未満の設定は、受け付けない", () => { assert.throws(() => mergeConfig({ interval_sec: 1.0 }), /3 秒以上/); });
 
-test("503で止まり、次回は取れていないレースだけを再開する", async () => {
-  const s = await setup(); await s.state.init(TODAY); const first = await s.state.nextDay();
-  s.fake.failAfter = 5;
-  const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 1, fetcher: s.mk(), now: NOW });
-  assert.deepEqual(r.done, []); assert.match(r.interrupted, /503/);
-  assert.ok((await s.state.pending()).includes(first)); assert.equal((await s.state.failed())[first].attempts, 1); assert.equal((await s.state.failed())[first].gave_up, false);
-  assert.equal((await s.state.loadWork(first)).size, 2);                            // 5ページ目まで成功=2レース分(2種×2)
+test("503(混雑): 長く待って試し直し、続くならその日を飛ばして次の日へ進む。次回は取れていないレースだけ再開", async () => {
+  const s = await setup(); await s.state.init(TODAY); const [p0, p1] = await s.state.pending();
+  s.fake.failAfter = 5;                                                            // 6ページ目から、ずっと 503
+  const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 2, fetcher: s.mk(), now: NOW });
+  assert.deepEqual(r.done, []); assert.deepEqual(r.failed, [p0, p1]); assert.equal(r.interrupted, null);   // 止まらずに、2日目まで進んだ
+  assert.ok(s.slept.filter((ms) => ms === 300000).length >= 2);                   // 503 の時は5分待ってから試し直す
+  assert.equal(s.fake.requests.length, 5 + 3 + 3);                                // 1日目: 成功5 + 503×3(最初+試し直し2回)、2日目: 503×3
+  for (const d of [p0, p1]) { assert.ok((await s.state.pending()).includes(d)); assert.equal((await s.state.failed())[d].attempts, 1); }
+  assert.equal((await s.state.loadWork(p0)).size, 2);                             // 5ページ目まで成功=2レース分(2種×2)は、途中経過に残る
   const got = s.fake.requests.length; s.fake.failAfter = null;
   const r2 = await run(s.cfg, s.state, s.store, { ...quiet, days: 1, fetcher: s.mk(), now: NOW });
-  assert.deepEqual(r2.done, [first]); assert.equal(s.fake.requests.length - got, 6);   // 残り3レース×2種だけ。取得済みの2レースは取り直さない
-  assert.ok(!((await s.state.failed())[first])); s.close();
+  assert.deepEqual(r2.done, [p0]); assert.equal(s.fake.requests.length - got, 6);   // 残り3レース×2種だけ。取得済みの2レースは取り直さない
+  assert.ok(!((await s.state.failed())[p0])); s.close();
+});
+
+test("403/429(拒否)だけは、再試行せず、次の日にも進まずに止まる", async () => {
+  for (const code of [403, 429]) {
+    const s = await setup(); await s.state.init(TODAY); s.fake.failAfter = 0; s.fake.failStatus = code;
+    const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 3, fetcher: s.mk(), now: NOW });
+    assert.match(r.interrupted, new RegExp(String(code))); assert.equal(s.fake.requests.length, 1); assert.deepEqual(r.failed, []);
+    assert.equal((await s.state.pending()).length, 6); s.close();
+  }
+});
+
+test("通信エラー(HTTP 500 など)が続いた日は飛ばし、次の日は取れる", async () => {
+  const s = await setup(); await s.state.init(TODAY); const [p0, p1] = await s.state.pending();
+  s.fake.dayStatus.set(p0, 500);
+  const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 2, fetcher: s.mk(), now: NOW });
+  assert.deepEqual(r.failed, [p0]); assert.deepEqual(r.done, [p1]); assert.equal(r.interrupted, null);
+  assert.match((await s.state.failed())[p0].last_reason, /通信エラーが 5 回/);
+  assert.equal(s.fake.requests.filter(([hd]) => hd === p0).length, 5 * 3);       // 1ページ3回まで × 5ページ連続で、その日を切り上げる
+  assert.ok((await s.state.pending()).includes(p0)); s.close();
+});
+
+test("予期しないエラー(保存の失敗など)でも、その日を飛ばして次の日へ進む", async () => {
+  const s = await setup(); await s.state.init(TODAY); const [p0, p1] = await s.state.pending();
+  const bad = `${p0.slice(0, 4)}-${p0.slice(4, 6)}-${p0.slice(6)}`;
+  const store = { ...s.store, async writeText(x, t) { if (x.includes(bad)) throw new Error("disk full"); return s.store.writeText(x, t); } };
+  const r = await run(s.cfg, new State(s.cfg, store), store, { ...quiet, days: 2, fetcher: s.mk(), now: NOW });
+  assert.deepEqual(r.failed, [p0]); assert.deepEqual(r.done, [p1]);
+  assert.match((await s.state.failed())[p0].last_reason, /予期しないエラー: disk full/); s.close();
+});
+
+test("失敗した日の後の待ち時間の途中でも、停止ボタンで止まる", async () => {
+  const s = await setup(); await s.state.init(TODAY); s.fake.failAfter = 0;
+  const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 3, fetcher: s.mk(), now: NOW, shouldStop: () => s.slept.filter((ms) => ms === 1000).length >= 10 });
+  assert.equal(r.interrupted, "stopped"); assert.equal(r.failed.length, 1); assert.equal(s.fake.requests.length, 3); s.close();
 });
 
 test("失敗が続くと『取れていない日』になり、リストから外れる。requeueで戻せる", async () => {
@@ -101,11 +137,14 @@ test("データなし(404・表なし)と読み取り失敗(構造の崩れ)が�
   assert.ok(fs.existsSync(path.join(s.root, "work", "raw_errors", first, "19_01_3t.html"))); s.close();
 });
 
-test("読み取り失敗が続くと止まる(3連単だけが壊れても、2連単の成功に打ち消されない)", async () => {
-  const s = await setup({ max_consecutive_parse_errors: 3 }); await s.state.init(TODAY); const first = await s.state.nextDay();
+test("読み取り失敗が続く日は切り上げて、次の日へ進む(3連単だけが壊れても、2連単の成功に打ち消されない)", async () => {
+  const s = await setup({ max_consecutive_parse_errors: 3 }); await s.state.init(TODAY); const [p0, p1] = await s.state.pending();
   for (const [j, r] of RACES) s.fake.broken.add(`${j}-${r}-3t`);
-  const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 1, fetcher: s.mk(), now: NOW });
-  assert.match(r.interrupted, /形式が変わった/); assert.ok((await s.state.pending()).includes(first)); s.close();
+  const r = await run(s.cfg, s.state, s.store, { ...quiet, days: 2, fetcher: s.mk(), now: NOW });
+  assert.deepEqual(r.failed, [p0, p1]); assert.equal(r.interrupted, null);
+  assert.match((await s.state.failed())[p0].last_reason, /形式が変わった/);
+  assert.equal(s.fake.requests.filter(([hd]) => hd === p0).length, 5);            // 3t,2tf,3t,2tf,3t: 3レース目の3連単(3回目の失敗)で、その日を切り上げる
+  assert.ok((await s.state.pending()).includes(p0)); s.close();
 });
 
 test("停止ボタン・実行時間帯: 時間帯の外では1件もアクセスしない。停止が押されたら止まる", async () => {

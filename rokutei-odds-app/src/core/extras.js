@@ -25,6 +25,7 @@ export async function probeRace(cfg, store, ymd, jcd, rno, { fetcher = null, fet
   if (!/^\d{8}$/.test(ymd)) throw new Error("日付は YYYY-MM-DD の形で入れてください");
   if (!(jcd >= 1 && jcd <= 24) || !(rno >= 1 && rno <= 12)) throw new Error("場は1〜24、Rは1〜12で入れてください");
   if (ymd >= todayJst(now)) throw new Error("今日以降の日は取りません(確定前のオッズになるため)");
+  cfg = { ...cfg, busy_retries: 0 };                 // 確認用なので、混雑(503)の時は待たずに、すぐ結果を返す
   fetcher = fetcher ?? new Fetcher(cfg, { fetchFn });
   await fetcher.checkRobots();
   const out = [];

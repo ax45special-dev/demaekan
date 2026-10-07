@@ -1,6 +1,9 @@
-// 1日分(全場・全レース)を取得して、保存し、状態を更新する。Python版(odds_tool/runner.py)と同じ動き。
+// 1日分(全場・全レース)を取得して、保存し、状態を更新する。
+// エラーがあっても、その回は止めない: 失敗した日は記録して、少し待ってから次の日へ進む(次回また取り直す)。
+// 止まるのは、停止ボタン・ページ数の上限・公式サイトの拒否(HTTP 403/429)・robots.txt の禁止 だけ。
+// (Python版 odds_tool/runner.py は、以前の「エラーで止まる」動きのまま。読み取りの基準実装として使う)
 import { parsePage, NoOddsTable, ParseError } from "./parse.js";
-import { Fetcher, StopRun, PageError, fetchRacesForDay } from "./net.js";
+import { Fetcher, StopRun, PageError, fetchRacesForDay, realSleep } from "./net.js";
 import { writeDay } from "./storage.js";
 import { todayJst } from "./state.js";
 
@@ -58,15 +61,16 @@ export async function processDay(cfg, state, store, fetcher, day, budget, { log 
       try { res = await fetchOnePage(cfg, store, fetcher, day, jcd, rno, kind); consecErr = 0; }
       catch (e) {
         if (!(e instanceof PageError)) throw e;
+        if (e.busy) throw e;                                   // 503 が続く=混雑。この日は切り上げて、待ってから次の日へ
         res = { status: "error", note: e.message };
-        if (++consecErr >= cfg.max_consecutive_errors) throw new StopRun(`通信エラーが ${consecErr} 回続いたため止めます(${e.message})`);
+        if (++consecErr >= cfg.max_consecutive_errors) throw new PageError(`通信エラーが ${consecErr} 回続きました(${e.message})`);
       }
       budget.pages -= 1;
       if (res.status === "parse_error") consecParse[kind] += 1; else if (res.status === "ok") consecParse[kind] = 0;
       rec["r" + kind] = res;
       if (consecParse[kind] >= cfg.max_consecutive_parse_errors) {
         await state.appendWork(day, rec);
-        throw new StopRun(`${kind} の読み取り失敗が ${consecParse[kind]} 回続きました。公式サイトの形式が変わった可能性があります(raw_errors に生のHTMLを保存)`);
+        throw new PageError(`${kind} の読み取り失敗が ${consecParse[kind]} 回続きました。公式サイトの形式が変わった可能性があります(raw_errors に生のHTMLを保存)`);
       }
     }
     if (cfg.bet_types.some((k) => rec["r" + k]?.status === "error")) continue; // 通信エラーのレースは保存しない=次回また取り直す
@@ -86,40 +90,61 @@ export async function processDay(cfg, state, store, fetcher, day, budget, { log 
   return stats;
 }
 
-// 未取得リストの先頭から順に、days 日ぶん取る。
-export async function run(cfg, state, store, { days = null, ignoreWindow = false, fetcher = null, log = () => {}, now = new Date(), shouldStop = () => false, fetchFn } = {}) {
+// 待つ(停止が押されたら、すぐ戻る)。戻り値: 最後まで待てたら true
+async function pause(ms, sleep, shouldStop) {
+  for (let t = 0; t < ms; t += 1000) { if (shouldStop()) return false; await sleep(Math.min(1000, ms - t)); }
+  return !shouldStop();
+}
+
+// 未取得リストの先頭から順に、days 日ぶん取る。失敗した日は記録して飛ばし、次の日へ進む。
+export async function run(cfg, state, store, { days = null, ignoreWindow = false, fetcher = null, log = () => {}, now = new Date(), shouldStop = () => false, fetchFn, sleep = null } = {}) {
   const nDays = days ?? cfg.days_per_run, nowIso = now.toISOString();
-  const summary = { done: [], interrupted: null, pages: 0 };
+  const summary = { done: [], failed: [], interrupted: null, pages: 0 };
   if (shouldStop()) { summary.interrupted = "stopped"; return summary; }
   if (!ignoreWindow && !inWindow(cfg, now)) { log(`実行時間帯(${cfg.run_window_jst.start}〜${cfg.run_window_jst.end} JST)の外です。何もせず終了します`); summary.interrupted = "outside window"; return summary; }
-  fetcher = fetcher ?? new Fetcher(cfg, { fetchFn });
+  sleep = sleep ?? fetcher?._sleep ?? realSleep;
+  fetcher = fetcher ?? new Fetcher(cfg, { fetchFn, sleep });
+  fetcher.onNotice ??= (m) => log("  … " + m);
   const budget = { pages: cfg.max_pages_per_run };
+  const tried = new Set(); let failStreak = 0;
   try {
     await fetcher.checkRobots();
     for (let i = 0; i < nDays; i++) {
-      const day = await state.nextDay();
-      if (day === null) { log("未取得の日がありません。『取る日を決める』で追加してください"); break; }
+      const day = (await state.pending()).find((d) => !tried.has(d)) ?? null;   // この回で失敗した日は、もう一度は取らない(次回に回す)
+      if (day === null) { log(tried.size ? "この回で取れる日は、ここまでです" : "未取得の日がありません。『取る日を決める』で追加してください"); break; }
+      tried.add(day);
       if (day >= todayJst(now)) { log(`  ${day} は今日以降のため取得しません(確定前のオッズになるため)`); await state.dropPending(day); continue; }
       if (shouldStop()) { summary.interrupted = "stopped"; break; }
       log(`▶ ${day} を取得します(残り ${(await state.pending()).length} 日)`);
       let stats;
-      try { stats = await processDay(cfg, state, store, fetcher, day, budget, { log, shouldStop, fetchFn, nowIso: () => nowIso }); }
+      try {
+        stats = await processDay(cfg, state, store, fetcher, day, budget, { log, shouldStop, fetchFn, nowIso: () => nowIso });
+        await state.markDone(day, stats); await state.clearWork(day);
+      }
       catch (e) {
         if (e instanceof PageBudget || e instanceof UserStop) { log("  ■ " + e.message); summary.interrupted = e.message; break; } // 異常ではないので、失敗回数は増やさない
-        if (e instanceof StopRun || e instanceof PageError) {
-          const rec = await state.markInterrupted(day, e.message, nowIso);
-          log(`  ■ 中断: ${e.message} (この日の失敗 ${rec.attempts}/${cfg.max_attempts_per_day}回${rec.gave_up ? "→ 取れていない日に回しました" : ""})`);
-          summary.interrupted = e.message; break;
+        if (e instanceof StopRun) throw e;                                                  // 公式サイトの拒否(403/429)だけは、その回を止める
+        // それ以外(通信エラー・混雑・読み取り失敗の連続・予期しないエラー)は、この日を失敗として記録し、次の日へ
+        const msg = e instanceof PageError ? e.message : `予期しないエラー: ${e && e.message ? e.message : e}`;
+        let rec = { attempts: "?", gave_up: false };
+        try { rec = await state.markInterrupted(day, msg, nowIso); } catch (e2) { log(`  (失敗の記録に失敗: ${e2.message || e2})`); }
+        summary.failed.push(day); failStreak++;
+        log(`  ✖ ${day} を飛ばします: ${msg} (この日の失敗 ${rec.attempts}/${cfg.max_attempts_per_day}回${rec.gave_up ? "→ 取れていない日に回しました" : "。次回また取ります"})`);
+        if (i + 1 < nDays) {
+          const wait = Math.min(cfg.failed_day_wait_sec * 2 ** (failStreak - 1), cfg.failed_day_wait_max_sec);
+          log(`  ${Math.round(wait / 60)}分 待ってから、次の日に進みます`);
+          if (!(await pause(wait * 1000, sleep, shouldStop))) { summary.interrupted = "stopped"; break; }
         }
-        throw e;
+        continue;
       }
-      await state.markDone(day, stats); await state.clearWork(day); summary.done.push(day);
+      failStreak = 0; summary.done.push(day);
       log(`  ✔ ${day} 完了: ${stats.races} レース / ${stats.pages} ページ / データなし ${stats.no_data} / 読み取り失敗 ${stats.parse_errors}`);
     }
   } catch (e) {
-    if (e instanceof StopRun) { log("■ 中止: " + e.message); summary.interrupted = e.message; } else throw e;
+    if (e instanceof StopRun) { log("■ 中止: " + e.message); summary.interrupted = e.message; }
+    else { log("■ 予期しないエラーで、この回を終えます: " + (e && e.message ? e.message : e)); summary.interrupted = String(e && e.message ? e.message : e); }
   }
   summary.pages = cfg.max_pages_per_run - budget.pages;
-  await store.writeJson(`${cfg.state_dir}/last_run.json`, { at: nowIso, ...summary });
+  try { await store.writeJson(`${cfg.state_dir}/last_run.json`, { at: nowIso, ...summary }); } catch { /* 記録の失敗で落とさない */ }
   return summary;
 }

@@ -15,6 +15,11 @@ export const DEFAULTS = {
   max_consecutive_errors: 5,
   max_consecutive_parse_errors: 3,
   max_attempts_per_day: 3,
+  // エラーがあっても止めずに続けるための設定(403/429 だけは止まる)
+  busy_wait_sec: 300, // HTTP 503(混雑)の時に待つ秒数
+  busy_retries: 2, // 503 の時に、同じページを試し直す回数
+  failed_day_wait_sec: 300, // 1日分が失敗した後、次の日に進む前に待つ秒数(続けて失敗すると倍々に、最大 failed_day_wait_max_sec)
+  failed_day_wait_max_sec: 1800,
   base_url: "https://www.boatrace.jp",
   calendar_base_url: "https://boatraceopenapi.github.io",
   user_agent: "rokutei-lab-odds-research/1.0 (personal research)",
@@ -40,6 +45,7 @@ export function validate(cfg) {
   if (!cfg.bet_types.length || !cfg.bet_types.every((t) => t === "3t" || t === "2tf")) errs.push("bet_types は '3t' と '2tf' の組み合わせにしてください");
   if (!["random", "range", "list"].includes(cfg.sample.mode)) errs.push("sample.mode は random / range / list のどれかにしてください");
   if (!(cfg.days_per_run >= 1) || !(cfg.max_pages_per_run >= 1)) errs.push("days_per_run と max_pages_per_run は1以上にしてください");
+  if (!(cfg.busy_wait_sec >= 60) || !(cfg.failed_day_wait_sec >= 60)) errs.push("busy_wait_sec と failed_day_wait_sec は60秒以上にしてください(混雑時に間を空けるため)");
   if (cfg.run_window_jst && !(cfg.run_window_jst.start && cfg.run_window_jst.end)) errs.push('run_window_jst は {start:"01:00", end:"07:00"} の形にしてください');
   if (errs.length) throw new Error("設定エラー:\n  - " + errs.join("\n  - "));
 }

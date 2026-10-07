@@ -48,9 +48,12 @@ test("1レースだけ確認: 今日以降の日・範囲外の場は、アク�
   s.close();
 });
 
-test("1レースだけ確認: 503 なら再試行せずに止まる", async () => {
-  const s = await setup(); s.fake.failAfter = 0; const f = s.mk();
-  await assert.rejects(probeRace(s.cfg, s.store, "20260102", 19, 8, { fetcher: f, now: NOW }), /HTTP 503/);
+test("1レースだけ確認: 403 なら再試行せずに止まる。503 は待たずに、すぐ失敗を返す", async () => {
+  const s = await setup(); s.fake.failAfter = 0; s.fake.failStatus = 403;
+  await assert.rejects(probeRace(s.cfg, s.store, "20260102", 19, 8, { now: NOW }), /HTTP 403/);
+  assert.equal(s.fake.requests.length, 1);
+  s.fake.failStatus = 503; s.fake.requests.length = 0;
+  await assert.rejects(probeRace(s.cfg, s.store, "20260102", 19, 8, { now: NOW }), /HTTP 503/);
   assert.equal(s.fake.requests.length, 1);
   s.close();
 });

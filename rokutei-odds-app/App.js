@@ -52,9 +52,12 @@ export default function App() {
   });
   const work = async (shouldStop, foreground) => {
     const cfg = cfgFromForm(); const st = new State(cfg, store);
-    const r = await run(cfg, st, store, { log: (m) => { log(m); if (!foreground) updateNotification(m.slice(0, 60)); }, shouldStop, ignoreWindow: foreground });
-    log(`今回: 取れた日 ${r.done.map(iso).join(", ") || "なし"} / ページ ${r.pages}${r.interrupted ? " / 中断: " + r.interrupted : ""}`);
-    await refresh();
+    try {
+      // 通知の更新に失敗しても、取得は続ける
+      const r = await run(cfg, st, store, { log: (m) => { log(m); if (!foreground) updateNotification(m.slice(0, 60)).catch(() => {}); }, shouldStop, ignoreWindow: foreground });
+      log(`今回: 取れた日 ${r.done.map(iso).join(", ") || "なし"}${r.failed.length ? ` / 飛ばした日(次回また取る) ${r.failed.map(iso).join(", ")}` : ""} / ページ ${r.pages}${r.interrupted ? " / 中断: " + r.interrupted : ""}`);
+    } catch (e) { log("■ エラー: " + (e && e.message ? e.message : e)); }
+    await refresh().catch(() => {});
   };
   const startFg = () => guard(async () => {
     cfgFromForm(); stopRef.current = false; setRunning(true); await activateKeepAwakeAsync();

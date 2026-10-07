@@ -63,6 +63,7 @@
 - 通信のタイムアウト用タイマーを止め忘れると、受け取ったデータが60秒間メモリに残る(別のアプリで実際に起きた)。このリポジトリでは、タイマーを `finally` で必ず止めている。
 - 共有後にデータを削除した日を、再び書き出さないようにしてある(`data_deleted`)。
 - `react-native-background-actions` の起動オプションは **`foregroundServiceType`(単数形)**。以前は `foregroundServiceTypes` と書いていて、ライブラリに無視されていた(v4.1.0 の `src/index.js` と `BackgroundTaskOptions.java` で確認。修正済み、2026-10-07)。
+- 実機で、29日分の収集が途中で止まった(2026-10-07 利用者の報告。原因のログは無し)。以前は、通信エラー・503・読み取り失敗の連続・予期しないエラーのどれでも、その回の残りの日をすべて止めていた。→ 失敗した日は記録して飛ばし、待ってから次の日へ進むように変更(止まるのは 403/429・robots.txt の禁止・停止ボタン・ページ数の上限だけ)。Python版の runner は、以前の動きのまま。
 - `babel.config.js` が `babel-preset-expo` を使うのに、依存に入っていなかった(npm が `expo/node_modules` の中にしか入れない)。devDependencies に追加済み。
 
 ## 7. 未確認の事項(まとめ)
