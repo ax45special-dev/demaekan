@@ -1,0 +1,20 @@
+{
+  "name": "rokutei-odds",
+  "version": "1.0.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "test": "node --test tests/parse.test.mjs tests/flow.test.mjs tests/app_logic.test.mjs tests/extras.test.mjs"
+  },
+  "dependencies": {
+    "expo": "~54.0.0",
+    "expo-file-system": "~19.0.24",
+    "expo-sharing": "~14.0.8",
+    "expo-keep-awake": "~15.0.8",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-background-actions": "^4.1.0"
+  },
+  "devDependencies": { "@babel/core": "^7.25.0", "babel-preset-expo": "~54.0.12" }
+}

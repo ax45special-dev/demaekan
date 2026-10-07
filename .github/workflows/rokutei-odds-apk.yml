@@ -1,0 +1,60 @@
+name: ROKUTEI odds APK
+
+# Builds rokutei-odds-app without EAS (no Expo account / EXPO_TOKEN needed):
+# tests -> expo prebuild -> gradle assembleRelease (debug-signed) -> manifest check -> artifact.
+on:
+  push:
+    paths:
+      - 'rokutei-odds-app/**'
+      - '.github/workflows/rokutei-odds-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rokutei-odds-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: rokutei-odds-app/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: npm ci
+      - run: npm test
+      - name: Python reference tests
+        run: |
+          (cd python-reference && python3 -m unittest tests.test_parse tests.test_flow)
+          python3 tools/test_validate.py
+      - name: Prebuild native Android project
+        run: npx expo prebuild --platform android --no-install
+        env:
+          CI: '1'
+      - name: Build APK
+        working-directory: rokutei-odds-app/android
+        run: ./gradlew assembleRelease --no-daemon
+      - name: Check APK manifest (permissions and foreground service)
+        run: |
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          AAPT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)aapt
+          "$AAPT" dump permissions "$APK" | tee perms.txt
+          "$AAPT" dump xmltree "$APK" AndroidManifest.xml > manifest.txt
+          for p in FOREGROUND_SERVICE FOREGROUND_SERVICE_DATA_SYNC WAKE_LOCK POST_NOTIFICATIONS INTERNET; do
+            grep -q "name='android.permission.$p'" perms.txt || { echo "missing permission $p"; exit 1; }
+          done
+          # the service element of react-native-background-actions, up to the next element
+          awk '/E: service/{if(f)exit; s=$0; next} s!="" && /E: /{if(f)exit; s=""} s!=""{s=s"\n"$0; if(/RNBackgroundActionsTask/)f=1} END{if(f)print s}' manifest.txt > service.txt
+          printf '%b\n' "$(cat service.txt)"
+          grep -q 'com.asterinet.react.bgactions.RNBackgroundActionsTask' service.txt || { echo "missing service"; exit 1; }
+          # FOREGROUND_SERVICE_TYPE_DATA_SYNC = 0x1
+          printf '%b\n' "$(cat service.txt)" | grep -Eq 'foregroundServiceType\([^)]*\)=\(type 0x11\)0x1$' || { echo "service is not foregroundServiceType=dataSync"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rokutei-odds-apk
+          path: rokutei-odds-app/android/app/build/outputs/apk/release/app-release.apk

@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "ROKUTEI オッズ収集",
+    "slug": "rokutei-odds",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "rokuteiodds",
+    "android": { "package": "com.rokutei.odds" },
+    "plugins": ["./plugins/withBackgroundActions"]
+  }
+}
