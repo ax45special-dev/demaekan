@@ -6,3 +6,5 @@ dist/
 android/
 ios/
 logs/
+__pycache__/
+*.pyc
