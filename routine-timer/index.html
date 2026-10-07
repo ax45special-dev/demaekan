@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ロマサガ風ルーティンタイマー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&display=swap">
+<style>
+  /* Layout: one RPG "window" column — timer up top, then schedule, tasks, records. Single dark look by design. */
+  :root {
+    color-scheme: dark;
+    --night: #0b0d22;
+    --win-top: #1c2a6e;
+    --win-bot: #0d1438;
+    --win-flat: #111735;
+    --well: #080b1f;
+    --gold: #e8c45c;
+    --gold-hi: #ffe08a;
+    --gold-dim: #8a6f27;
+    --ink: #f3f0e3;
+    --ink-sub: #a9aed0;
+    --ink-mute: #6f7499;
+    --ok: #5fd08e;
+    --warn: #f0b443;
+    --bad: #f0695a;
+    --font-ui: 'DotGothic16', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', sans-serif;
+    --font-digit: 'Press Start 2P', ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { min-height: 100%; }
+  body {
+    background: radial-gradient(ellipse at top, #161b45 0%, var(--night) 60%) fixed, var(--night);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    font-size: 15px;
+    line-height: 1.5;
+    padding-inline: 16px;
+    padding-block: 16px 96px;
+  }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 2px; }
+
+  .app { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+
+  /* SaGa-style window: blue gradient, double gold frame */
+  .win {
+    background: linear-gradient(180deg, var(--win-top), var(--win-bot));
+    border: 3px solid var(--gold);
+    box-shadow: inset 0 0 0 2px #000, inset 0 0 0 3px var(--gold-dim), 0 6px 0 rgba(0,0,0,.35);
+    border-radius: 6px;
+    padding: 14px;
+  }
+  .win-title {
+    font-size: .8rem; letter-spacing: .12em; color: var(--ink-sub);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-bottom: 10px;
+  }
+  .win-title::before { content: '▶'; color: var(--gold); margin-right: 6px; font-size: .7rem; }
+  .win-title > span:first-child { flex: 1; }
+
+  /* Header */
+  .header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .title { font-size: 1.25rem; color: var(--gold); text-shadow: 2px 2px 0 #000; letter-spacing: .04em; }
+  .title small { display: block; font-size: .7rem; color: var(--ink-sub); text-shadow: none; letter-spacing: .1em; }
+  .header-controls { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .chip-btn {
+    background: var(--well); border: 2px solid var(--gold-dim); color: var(--ink-sub);
+    padding: 5px 10px; border-radius: 4px; font-size: .85rem;
+  }
+  .chip-btn[aria-pressed="true"] { border-color: var(--gold); color: var(--gold-hi); background: #1a2460; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+  .tab {
+    background: var(--well); border: 2px solid var(--gold-dim); color: var(--ink-sub);
+    padding: 7px 14px; border-radius: 4px; white-space: nowrap;
+  }
+  .tab.active { border-color: var(--gold); color: var(--gold-hi); background: #1a2460; }
+  .tab.active::before { content: '▶ '; font-size: .7em; }
+  .tab-add { border-style: dashed; }
+  .tab-form { display: flex; gap: 6px; }
+  .tab-form input { width: 9em; }
+
+  /* Inputs */
+  input[type="text"], input[type="number"], input[type="time"] {
+    background: var(--well); border: 1px solid var(--gold-dim); color: var(--ink);
+    padding: 6px 8px; border-radius: 3px; min-width: 0;
+  }
+  input:focus { border-color: var(--gold); outline: none; }
+
+  /* Buttons */
+  .btn {
+    background: #222b63; border: 2px solid var(--gold-dim); color: var(--ink);
+    padding: 9px 16px; border-radius: 4px; font-size: 1rem; white-space: nowrap;
+    box-shadow: 0 3px 0 #000;
+    transition: transform .05s;
+  }
+  .btn:hover { border-color: var(--gold); }
+  .btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #000; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary { background: var(--gold); color: #1a1405; border-color: var(--gold-hi); font-weight: bold; }
+  .btn-primary:hover { background: var(--gold-hi); }
+  .btn-danger { background: #4a1620; border-color: #9b3a3a; }
+  .btn-sm { padding: 4px 9px; font-size: .8rem; box-shadow: 0 2px 0 #000; }
+  .icon-btn {
+    background: var(--well); border: 1px solid var(--gold-dim); color: var(--ink-sub);
+    width: 30px; height: 30px; border-radius: 3px; display: inline-grid; place-items: center; font-size: .8rem;
+  }
+  .icon-btn:hover { color: var(--gold-hi); border-color: var(--gold); }
+  .icon-btn:disabled { opacity: .3; cursor: default; }
+
+  /* Timer */
+  .timer { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: center; }
+  .ring-wrap { position: relative; width: 200px; aspect-ratio: 1; max-width: 100%; }
+  .ring-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring-track { fill: none; stroke: var(--well); stroke-width: 14; }
+  .ring-tick { fill: none; stroke: var(--gold-dim); stroke-width: 14; stroke-dasharray: 1 7.2; opacity: .5; }
+  .ring-bar { fill: none; stroke: var(--gold); stroke-width: 10; stroke-linecap: butt; transition: stroke-dashoffset .25s linear, stroke .3s; }
+  .ring-bar.over { stroke: var(--bad); }
+  .ring-bar.last-min { stroke: var(--warn); }
+  .ring-center { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px; }
+  .time-big { font-family: var(--font-digit); font-size: 1.75rem; letter-spacing: -.02em; text-shadow: 3px 3px 0 #000; font-variant-numeric: tabular-nums; }
+  .time-big.over { color: var(--bad); }
+  .ring-sub { font-size: .75rem; color: var(--ink-sub); }
+
+  .timer-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .now-label { font-size: .75rem; color: var(--ink-sub); letter-spacing: .1em; }
+  .now-task { font-size: 1.35rem; color: var(--gold-hi); text-shadow: 2px 2px 0 #000; line-height: 1.3; overflow-wrap: anywhere; text-wrap: balance; }
+  .next-task { font-size: .85rem; color: var(--ink-sub); overflow-wrap: anywhere; }
+  .next-task b { color: var(--ink); font-weight: normal; }
+  .timer-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Schedule bar */
+  .sched-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; margin-bottom: 10px; font-size: .9rem; }
+  .sched-meta label { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-sub); }
+  .kv { color: var(--ink-sub); }
+  .kv strong { color: var(--gold-hi); font-family: var(--font-digit); font-size: .8rem; font-weight: normal; margin-left: 4px; }
+  .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; border: 1px solid currentColor; font-size: .8rem; }
+  .status-pill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .status-ok { color: var(--ok); }
+  .status-warn { color: var(--warn); }
+  .status-bad { color: var(--bad); }
+
+  .segbar { display: flex; gap: 2px; height: 22px; position: relative; }
+  .seg { position: relative; background: var(--well); border: 1px solid var(--gold-dim); border-radius: 3px; overflow: hidden; min-width: 6px; }
+  .seg-fill { position: absolute; inset: 0 auto 0 0; background: var(--gold-dim); transition: width .25s linear; }
+  .seg.done .seg-fill { background: var(--gold-dim); }
+  .seg.current { border-color: var(--gold-hi); }
+  .seg.current .seg-fill { background: var(--gold); }
+  .seg.over .seg-fill { background: var(--bad); }
+  .seg-num { position: absolute; inset: 0; display: grid; place-items: center; font-size: .7rem; color: var(--ink-sub); pointer-events: none; }
+  .seg.current .seg-num { color: #1a1405; }
+  .seg-axis { display: flex; justify-content: space-between; font-family: var(--font-digit); font-size: .6rem; color: var(--ink-mute); margin-top: 6px; }
+
+  /* Task list */
+  .add-form { display: grid; grid-template-columns: 1fr 76px auto; gap: 8px; margin-bottom: 12px; }
+  .add-form .min-wrap { position: relative; }
+  .add-form .min-wrap input { width: 100%; padding-right: 22px; }
+  .add-form .min-wrap span { position: absolute; right: 7px; top: 50%; transform: translateY(-50%); font-size: .8rem; color: var(--ink-sub); pointer-events: none; }
+
+  .task-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .task {
+    display: grid; grid-template-columns: 28px 1fr auto; gap: 4px 10px; align-items: center;
+    background: rgba(8, 11, 31, .6); border: 1px solid var(--gold-dim); border-radius: 4px; padding: 8px 10px;
+  }
+  .task.current { border-color: var(--gold-hi); background: rgba(232, 196, 92, .12); }
+  .task.done { opacity: .55; }
+  .task-idx { font-family: var(--font-digit); font-size: .65rem; color: var(--gold); text-align: center; }
+  .task.current .task-idx::before { content: '▶'; display: block; font-size: .7rem; }
+  .task-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .task-name { background: transparent; border: 1px solid transparent; padding: 2px 4px; margin-left: -4px; border-radius: 3px; width: 100%; }
+  .task-name:hover { border-color: var(--gold-dim); }
+  .task-name:focus { border-color: var(--gold); background: var(--well); outline: none; }
+  .task-sub { font-size: .75rem; color: var(--ink-mute); display: flex; gap: 10px; flex-wrap: wrap; }
+  .task-sub .clock { font-family: var(--font-digit); font-size: .6rem; color: var(--ink-sub); line-height: 1.9; }
+  .task-sub .avg-ok { color: var(--ok); }
+  .task-sub .avg-over { color: var(--warn); }
+  .task-ctrl { display: flex; align-items: center; gap: 4px; }
+  .task-min { width: 54px; text-align: right; padding: 4px 6px; }
+  .task-ctrl .unit { font-size: .8rem; color: var(--ink-sub); margin-right: 4px; }
+  .empty { color: var(--ink-sub); font-size: .9rem; padding: 14px; text-align: center; border: 1px dashed var(--gold-dim); border-radius: 4px; }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .preset {
+    background: var(--well); border: 1px solid var(--gold-dim); color: var(--ink);
+    padding: 4px 9px; font-size: .82rem; border-radius: 3px;
+  }
+  .preset:hover { border-color: var(--gold); color: var(--gold-hi); }
+  .preset small { color: var(--ink-sub); margin-left: 4px; }
+  .preset.recent { border-style: dashed; }
+  .presets-label { width: 100%; font-size: .75rem; color: var(--ink-mute); }
+
+  /* Records */
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .tile { background: var(--well); border: 1px solid var(--gold-dim); border-radius: 4px; padding: 10px; min-width: 0; }
+  .tile-label { font-size: .72rem; color: var(--ink-sub); letter-spacing: .06em; }
+  .tile-value { font-family: var(--font-digit); font-size: 1.05rem; color: var(--gold-hi); margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .tile-value small { font-family: var(--font-ui); font-size: .75rem; color: var(--ink-sub); margin-left: 3px; }
+  .chart-box { background: var(--well); border: 1px solid var(--gold-dim); border-radius: 4px; padding: 10px 8px 4px; position: relative; }
+  .chart-head { display: flex; justify-content: space-between; align-items: center; font-size: .8rem; color: var(--ink-sub); padding: 0 4px 6px; gap: 8px; flex-wrap: wrap; }
+  .sample-tag { font-size: .7rem; color: var(--warn); border: 1px solid var(--warn); padding: 1px 6px; border-radius: 3px; }
+  #weekChart { width: 100%; height: auto; display: block; }
+  #weekChart text { font-family: var(--font-ui); }
+  .bar { fill: var(--gold-dim); }
+  .bar.today { fill: var(--gold); }
+  .bar-hit { fill: transparent; cursor: pointer; }
+  .bar-hit:hover + .bar, .bar-hit.focus + .bar { fill: var(--gold-hi); }
+  .grid-line { stroke: var(--ink-mute); stroke-width: 1; opacity: .35; stroke-dasharray: 2 3; }
+  .base-line { stroke: var(--gold-dim); stroke-width: 1; }
+  .axis-text { fill: var(--ink-mute); font-size: 10px; }
+  .axis-text.today { fill: var(--gold-hi); }
+  .val-text { fill: var(--ink); font-size: 11px; }
+  .records-note { font-size: .75rem; color: var(--ink-mute); margin-top: 8px; }
+  .history-list { list-style: none; margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: .82rem; }
+  .history-list li { display: flex; justify-content: space-between; gap: 10px; color: var(--ink-sub); border-bottom: 1px dotted rgba(138,111,39,.5); padding: 3px 2px; }
+  .history-list li span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* Tooltip */
+  .tip {
+    position: fixed; z-index: 30; pointer-events: none;
+    background: var(--win-bot); border: 2px solid var(--gold); color: var(--ink);
+    padding: 6px 10px; border-radius: 4px; font-size: .8rem; line-height: 1.4;
+    box-shadow: 0 4px 0 rgba(0,0,0,.5); max-width: 240px;
+  }
+  .tip b { color: var(--gold-hi); font-weight: normal; }
+
+  /* Message window (toast) */
+  .msg {
+    position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+    width: min(560px, calc(100% - 32px)); z-index: 40;
+    display: flex; gap: 12px; align-items: center;
+    animation: msg-in .25s ease-out;
+  }
+  .msg p { flex: 1; font-size: 1rem; }
+  .bulb { width: 32px; height: 32px; flex: none; image-rendering: pixelated; }
+  @keyframes msg-in { from { transform: translate(-50%, 20px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+  @keyframes flash { 0%,100% { filter: none; } 50% { filter: brightness(1.8); } }
+  .flash { animation: flash .4s 2; }
+
+  @media (max-width: 560px) {
+    .timer { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+    .timer-info { align-items: center; width: 100%; }
+    .timer-controls { justify-content: center; }
+    .ring-wrap { width: 210px; }
+    .add-form { grid-template-columns: 1fr 70px; }
+    .add-form .btn { grid-column: 1 / -1; }
+    .task { grid-template-columns: 24px 1fr; }
+    .task-ctrl { grid-column: 2; justify-content: flex-start; }
+    .tile-value { font-size: .85rem; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="header">
+    <h1 class="title">ルーティンタイマー<small>ROUTINE ／ 今日の行動を、一手ずつ</small></h1>
+    <div class="header-controls">
+      <button class="chip-btn" id="voiceBtn" aria-pressed="true">音声 ON</button>
+      <button class="chip-btn" id="overBtn" aria-pressed="false" title="時間切れのときの動き">時間切れ: 自動で次へ</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs" aria-label="ルーティン"></nav>
+
+  <!-- Timer -->
+  <section class="win" aria-label="タイマー">
+    <div class="timer">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 200 200" aria-hidden="true">
+          <circle class="ring-track" cx="100" cy="100" r="88"></circle>
+          <circle class="ring-tick" cx="100" cy="100" r="88"></circle>
+          <circle class="ring-bar" id="ringBar" cx="100" cy="100" r="88"></circle>
+        </svg>
+        <div class="ring-center">
+          <div class="time-big" id="timeBig" role="timer" aria-live="off">00:00</div>
+          <div class="ring-sub" id="ringSub">準備完了</div>
+        </div>
+      </div>
+      <div class="timer-info">
+        <div>
+          <div class="now-label" id="nowLabel">つぎの行動</div>
+          <div class="now-task" id="nowTask">—</div>
+        </div>
+        <div class="next-task" id="nextTask"></div>
+        <div class="timer-controls">
+          <button class="btn btn-primary" id="startBtn">実行開始</button>
+          <button class="btn" id="doneBtn" disabled>完了 → 次へ</button>
+          <button class="btn btn-danger" id="resetBtn" disabled>リセット</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Schedule -->
+  <section class="win" aria-label="スケジュール">
+    <div class="win-title"><span>スケジュール</span><span id="statusPill"></span></div>
+    <div class="sched-meta">
+      <label for="endTime">目標終了 <input type="time" id="endTime"></label>
+      <span class="kv">推奨開始<strong id="recStart">--:--</strong></span>
+      <span class="kv" id="etaLabel">見込み終了<strong id="eta">--:--</strong></span>
+    </div>
+    <div class="segbar" id="segbar" role="img" aria-label="ルーティンの進み具合"></div>
+    <div class="seg-axis"><span id="axisStart">--:--</span><span id="axisTotal"></span><span id="axisEnd">--:--</span></div>
+  </section>
+
+  <!-- Tasks -->
+  <section class="win" aria-label="タスク">
+    <div class="win-title"><span>コマンド一覧</span><span id="tabTools"></span></div>
+    <form class="add-form" id="addForm" autocomplete="off">
+      <input type="text" id="newName" placeholder="新しいタスク名" aria-label="タスク名">
+      <div class="min-wrap"><input type="number" id="newMin" value="5" min="1" max="240" aria-label="分"><span>分</span></div>
+      <button class="btn" type="submit">追加</button>
+    </form>
+    <ol class="task-list" id="taskList"></ol>
+    <div class="presets" id="presets"></div>
+  </section>
+
+  <!-- Records -->
+  <section class="win" aria-label="記録">
+    <div class="win-title"><span>冒険の記録</span></div>
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">連続達成</div><div class="tile-value" id="stStreak">0<small>日</small></div></div>
+      <div class="tile"><div class="tile-label">今日の完了</div><div class="tile-value" id="stToday">0<small>回</small></div></div>
+      <div class="tile"><div class="tile-label">7日間の合計</div><div class="tile-value" id="stWeek">0<small>分</small></div></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-head"><span>直近7日間の実行時間（分）</span><span id="sampleTag"></span></div>
+      <svg id="weekChart" viewBox="0 0 340 150" role="img" aria-label="直近7日間の実行時間"></svg>
+    </div>
+    <ul class="history-list" id="historyList"></ul>
+    <p class="records-note">記録はこの端末のブラウザにだけ保存されます。ルーティンを最後まで完了すると1回として数えます。</p>
+  </section>
+</div>
+
+<div class="tip" id="tip" hidden></div>
+<div class="msg win" id="msg" hidden role="status">
+  <svg class="bulb" viewBox="0 0 8 8" aria-hidden="true">
+    <rect x="2" y="0" width="4" height="1" fill="#ffe08a"/><rect x="1" y="1" width="6" height="3" fill="#ffe08a"/>
+    <rect x="2" y="1" width="1" height="1" fill="#fff"/><rect x="2" y="4" width="4" height="1" fill="#e8c45c"/>
+    <rect x="3" y="5" width="2" height="1" fill="#a9aed0"/><rect x="3" y="6" width="2" height="1" fill="#6f7499"/>
+  </svg>
+  <p id="msgText"></p>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const STORE_KEY = 'routine-timer-v2';
+  const PRESETS = [
+    { name: '掃除機をかける', min: 10 }, { name: 'ゴミ出し', min: 5 }, { name: 'ストレッチ', min: 5 },
+    { name: 'コーヒーを淹れる', min: 5 }, { name: 'メールチェック', min: 10 }, { name: '読書', min: 15 },
+    { name: '歯みがき', min: 3 }, { name: '着替え', min: 5 }
+  ];
+  const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+  const uid = () => Math.random().toString(36).slice(2, 10);
+  const $ = id => document.getElementById(id);
+
+  // ---------- state ----------
+  const defaults = () => ({
+    tabs: [
+      { id: uid(), name: '朝', endTime: '09:00', tasks: [
+        { id: uid(), name: '食器洗い・キッチンリセット', min: 15 },
+        { id: uid(), name: '洗濯物をたたむ・干す', min: 15 },
+        { id: uid(), name: 'デスクへ移動＆PCを開く', min: 3 },
+        { id: uid(), name: '水分補給＆深呼吸', min: 2 },
+        { id: uid(), name: '超・最小ステップ（集中）', min: 5 },
+        { id: uid(), name: 'メインタスク作業', min: 20 }
+      ] },
+      { id: uid(), name: '帰宅後', endTime: '20:00', tasks: [
+        { id: uid(), name: '手洗い・うがい・着替え', min: 5 },
+        { id: uid(), name: '夕食準備', min: 20 },
+        { id: uid(), name: '片付け・明日の準備', min: 10 }
+      ] }
+    ],
+    currentTabId: null,
+    voice: true,
+    overtime: false,
+    history: [],     // { date, ts, tabName, plannedMin, actualSec }
+    taskStats: {},   // name -> { n, sec }
+    recent: []       // { name, min }
+  });
+
+  let S;
+  try { S = JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { S = null; }
+  if (!S || !Array.isArray(S.tabs) || !S.tabs.length) S = defaults();
+  S = Object.assign(defaults(), S);
+  if (!S.tabs.some(t => t.id === S.currentTabId)) S.currentTabId = S.tabs[0].id;
+
+  function save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { /* storage unavailable */ }
+  }
+
+  // run state (not persisted)
+  const R = { status: 'idle', idx: 0, endAt: 0, remainingMs: 0, warned1: false, warnedOver: false, actual: [], startedAt: 0 };
+  let timerId = null;
+  let wakeLock = null;
+  let tabFormOpen = false;
+  let confirmDelete = false;
+
+  const tab = () => S.tabs.find(t => t.id === S.currentTabId);
+  const totalMin = t => t.tasks.reduce((s, x) => s + x.min, 0);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const pad = n => String(n).padStart(2, '0');
+  const clock = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  function mmss(ms) {
+    const neg = ms < 0;
+    const sec = neg ? Math.floor(-ms / 1000) : Math.ceil(ms / 1000);
+    const str = `${pad(Math.floor(sec / 60))}:${pad(sec % 60)}`;
+    return neg ? '+' + str : str;
+  }
+  function targetDate(t) {
+    const [h, m] = (t.endTime || '00:00').split(':').map(Number);
+    const d = new Date(); d.setHours(h, m, 0, 0);
+    // more than 3h past means the next occurrence (e.g. tomorrow morning)
+    if (d - Date.now() < -3 * 3600e3) d.setDate(d.getDate() + 1);
+    return d;
+  }
+  const curDurMs = () => tab().tasks[R.idx].min * 60000;
+  const remainingNow = () => R.status === 'running' ? R.endAt - Date.now() : R.remainingMs;
+
+  // ---------- sound & voice ----------
+  let audioCtx = null;
+  function chime(final) {
+    if (!S.voice) return;
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const notes = final ? [523, 659, 784, 1047] : [784, 1047];
+      notes.forEach((f, i) => {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = 'square'; o.frequency.value = f;
+        const t0 = audioCtx.currentTime + i * 0.11;
+        g.gain.setValueAtTime(0.06, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.18);
+        o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0 + 0.2);
+      });
+    } catch (e) { /* audio unavailable */ }
+  }
+  function speak(text) {
+    if (!S.voice || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP';
+    window.speechSynthesis.speak(u);
+  }
+
+  // ---------- message window ----------
+  let msgTimer = null;
+  function message(text) {
+    $('msgText').textContent = text;
+    const m = $('msg');
+    m.hidden = false;
+    m.style.animation = 'none'; void m.offsetWidth; m.style.animation = '';
+    clearTimeout(msgTimer);
+    msgTimer = setTimeout(() => { m.hidden = true; }, 3800);
+  }
+
+  // ---------- timer ----------
+  async function lockScreen() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { wakeLock = null; }
+  }
+  function unlockScreen() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+  function startOrPause() {
+    const t = tab();
+    if (!t.tasks.length) { message('タスクがありません。下の「コマンド一覧」から追加してください。'); return; }
+    if (R.status === 'running') {
+      R.remainingMs = R.endAt - Date.now();
+      R.status = 'paused';
+      clearInterval(timerId);
+      unlockScreen();
+    } else {
+      if (R.status === 'idle' || R.status === 'done') {
+        R.idx = 0; R.actual = []; R.startedAt = Date.now();
+        R.remainingMs = curDurMs(); R.warned1 = false; R.warnedOver = false;
+        speak(`${t.tasks[0].name}を開始します。`);
+        chime(false);
+      }
+      R.status = 'running';
+      R.endAt = Date.now() + R.remainingMs;
+      clearInterval(timerId);
+      timerId = setInterval(tick, 250);
+      lockScreen();
+    }
+    renderAll();
+  }
+
+  function tick() {
+    if (R.status !== 'running') return;
+    const rem = R.endAt - Date.now();
+    const dur = curDurMs();
+    if (!R.warned1 && dur > 90000 && rem <= 60000 && rem > 0) { R.warned1 = true; speak('残り1分です。'); }
+    if (rem <= 0) {
+      if (S.overtime) {
+        if (!R.warnedOver) { R.warnedOver = true; chime(false); speak('時間です。終わったら完了を押してください。'); }
+      } else {
+        advance(true);
+        return;
+      }
+    }
+    renderLive();
+  }
+
+  function advance(auto) {
+    const t = tab();
+    const task = t.tasks[R.idx];
+    const dur = task.min * 60000;
+    const rem = remainingNow();
+    const spent = auto ? dur : Math.max(0, dur - rem);
+    R.actual[R.idx] = spent / 1000;
+    const st = S.taskStats[task.name] || { n: 0, sec: 0 };
+    st.n++; st.sec += spent / 1000;
+    S.taskStats[task.name] = st;
+
+    if (!auto && rem > 60000) message(`ひらめいた！ 「${task.name}」を予定より ${Math.floor(rem / 60000)}分 早く片づけた。`);
+
+    const prevEnd = R.endAt;
+    R.idx++;
+    R.warned1 = false; R.warnedOver = false;
+    if (R.idx < t.tasks.length) {
+      const next = curDurMs();
+      if (R.status === 'running') {
+        // auto-advance keeps the schedule continuous even if the tab was in the background
+        R.endAt = (auto ? prevEnd : Date.now()) + next;
+      } else {
+        R.remainingMs = next;
+      }
+      speak(`次は ${t.tasks[R.idx].name} です。`);
+      chime(false);
+    } else {
+      finish();
+    }
+    save();
+    renderAll();
+  }
+
+  function finish() {
+    const t = tab();
+    clearInterval(timerId);
+    unlockScreen();
+    R.status = 'done';
+    const actualSec = R.actual.reduce((s, x) => s + (x || 0), 0);
+    S.history.push({ date: dayKey(new Date()), ts: Date.now(), tabName: t.name, plannedMin: totalMin(t), actualSec: Math.round(actualSec) });
+    if (S.history.length > 500) S.history = S.history.slice(-500);
+    chime(true);
+    speak('すべてのルーティンが完了しました。お疲れ様でした。');
+    message(`〈${t.name}〉のルーティンを制覇した！ 所要 ${Math.round(actualSec / 60)}分（予定 ${totalMin(t)}分）`);
+  }
+
+  function reset() {
+    clearInterval(timerId);
+    unlockScreen();
+    Object.assign(R, { status: 'idle', idx: 0, endAt: 0, remainingMs: 0, warned1: false, warnedOver: false, actual: [] });
+    renderAll();
+  }
+
+  const isActive = () => R.status === 'running' || R.status === 'paused';
+
+  // ---------- rendering ----------
+  const RING_C = 2 * Math.PI * 88;
+  $('ringBar').style.strokeDasharray = RING_C;
+
+  function renderLive() {
+    const t = tab();
+    const active = isActive();
+    const task = active ? t.tasks[R.idx] : null;
+    const dur = task ? task.min * 60000 : 1;
+    const rem = active ? remainingNow() : (t.tasks[0] ? t.tasks[0].min * 60000 : 0);
+    const over = active && rem < 0;
+
+    // ring
+    const frac = active ? Math.max(0, Math.min(1, rem / dur)) : 1;
+    const bar = $('ringBar');
+    bar.style.strokeDashoffset = over ? 0 : RING_C * (1 - frac);
+    bar.classList.toggle('over', over);
+    bar.classList.toggle('last-min', active && !over && rem <= 60000);
+    $('timeBig').textContent = R.status === 'done' ? 'CLEAR' : mmss(rem);
+    $('timeBig').classList.toggle('over', over);
+
+    // eta
+    const now = Date.now();
+    let restMs = 0;
+    if (active) {
+      restMs = Math.max(0, rem);
+      for (let i = R.idx + 1; i < t.tasks.length; i++) restMs += t.tasks[i].min * 60000;
+    } else if (R.status !== 'done') {
+      restMs = totalMin(t) * 60000;
+    }
+    const target = targetDate(t);
+    const eta = new Date(now + restMs);
+    $('eta').textContent = R.status === 'done' ? '完了' : clock(eta);
+    $('etaLabel').firstChild.textContent = active ? '見込み終了' : '今すぐ始めると';
+
+    const pill = $('statusPill');
+    if (R.status === 'done' || !t.tasks.length) {
+      pill.innerHTML = '';
+    } else {
+      const diffMin = Math.round((target - eta) / 60000);
+      let cls, label;
+      if (diffMin >= 5) { cls = 'status-ok'; label = diffMin >= 60 ? `余裕 ${Math.floor(diffMin / 60)}時間${diffMin % 60}分` : `余裕 ${diffMin}分`; }
+      else if (diffMin >= 0) { cls = 'status-warn'; label = `ギリギリ（あと${diffMin}分）`; }
+      else { cls = 'status-bad'; label = `${-diffMin}分 遅れ`; }
+      pill.innerHTML = `<span class="status-pill ${cls}">${label}</span>`;
+    }
+
+    // segment fills
+    const segs = $('segbar').children;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      let pct = 0, state = '';
+      if (R.status === 'done' || (active && i < R.idx)) { pct = 100; state = 'done'; }
+      else if (active && i === R.idx) { pct = over ? 100 : (1 - frac) * 100; state = over ? 'current over' : 'current'; }
+      s.className = 'seg ' + state;
+      s.firstChild.style.width = pct + '%';
+    }
+
+    // ring subtitle
+    let sub = '準備完了';
+    if (R.status === 'running') sub = over ? '時間切れ' : `${R.idx + 1} / ${t.tasks.length}`;
+    if (R.status === 'paused') sub = '一時停止中';
+    if (R.status === 'done') sub = 'すべて完了';
+    $('ringSub').textContent = sub;
+  }
+
+  function renderTimerText() {
+    const t = tab();
+    const active = isActive();
+    let label = 'つぎの行動', name = t.tasks[0] ? t.tasks[0].name : 'タスクを追加してください', next = '';
+    if (active) {
+      label = `いまの行動 ・ ${R.idx + 1}番目`;
+      name = t.tasks[R.idx].name;
+      const n = t.tasks[R.idx + 1];
+      next = n ? `次：<b>${esc(n.name)}</b>（${n.min}分）` : '次：ゴール';
+    } else if (R.status === 'done') {
+      label = 'ルーティン完了'; name = 'お疲れさまでした！';
+      next = 'もう一度行うときは「実行開始」を押してください。';
+    } else if (t.tasks.length) {
+      next = `全${t.tasks.length}手 ・ 合計 ${totalMin(t)}分`;
+    }
+    $('nowLabel').textContent = label;
+    $('nowTask').textContent = name;
+    $('nextTask').innerHTML = next;
+
+    $('startBtn').textContent = R.status === 'running' ? '一時停止' : R.status === 'paused' ? '再開' : R.status === 'done' ? 'もう一度' : '実行開始';
+    $('doneBtn').disabled = !active;
+    $('resetBtn').disabled = R.status === 'idle';
+  }
+
+  function renderTabs() {
+    const el = $('tabs');
+    let html = S.tabs.map(t => `<button class="tab ${t.id === S.currentTabId ? 'active' : ''}" data-tab="${t.id}">${esc(t.name)}</button>`).join('');
+    html += tabFormOpen
+      ? `<form class="tab-form" id="tabForm"><input type="text" id="tabName" placeholder="例：夜" aria-label="新しいルーティン名" maxlength="12"><button class="btn btn-sm" type="submit">作成</button><button class="btn btn-sm" type="button" id="tabCancel">やめる</button></form>`
+      : `<button class="tab tab-add" id="tabAdd">＋ ルーティン追加</button>`;
+    el.innerHTML = html;
+    if (tabFormOpen) $('tabName').focus();
+
+    $('tabTools').innerHTML = S.tabs.length > 1
+      ? `<button class="btn btn-sm btn-danger" id="tabDel">${confirmDelete ? '本当に削除する' : 'このルーティンを削除'}</button>`
+      : '';
+  }
+
+  function renderSchedule() {
+    const t = tab();
+    $('endTime').value = t.endTime;
+    const target = targetDate(t);
+    const start = new Date(target - totalMin(t) * 60000);
+    $('recStart').textContent = clock(start);
+
+    const base = isActive() || R.status === 'done' ? new Date(R.startedAt) : start;
+    $('axisStart').textContent = clock(base);
+    $('axisEnd').textContent = clock(target);
+    $('axisTotal').textContent = t.tasks.length ? `合計 ${totalMin(t)}分` : '';
+
+    $('segbar').innerHTML = t.tasks.map((x, i) =>
+      `<div class="seg" style="flex:${x.min} 1 0" data-seg="${i}"><div class="seg-fill"></div><span class="seg-num">${x.min >= totalMin(t) / 14 ? i + 1 : ''}</span></div>`
+    ).join('') || '<div class="empty" style="flex:1;padding:0;display:grid;place-items:center;font-size:.75rem">タスクがありません</div>';
+  }
+
+  function plannedClocks(t) {
+    // planned start for each task: from the live position while running, else from the recommended start
+    const out = [];
+    let cursor;
+    if (isActive()) {
+      const rem = Math.max(0, remainingNow());
+      cursor = Date.now() + rem - t.tasks[R.idx].min * 60000;
+      for (let i = 0; i < R.idx; i++) out[i] = null;
+      for (let i = R.idx; i < t.tasks.length; i++) { out[i] = new Date(cursor); cursor += t.tasks[i].min * 60000; }
+    } else {
+      cursor = targetDate(t) - totalMin(t) * 60000;
+      t.tasks.forEach((x, i) => { out[i] = new Date(cursor); cursor += x.min * 60000; });
+    }
+    return out;
+  }
+
+  function renderTasks() {
+    const t = tab();
+    const list = $('taskList');
+    if (!t.tasks.length) {
+      list.innerHTML = '<li class="empty">まだタスクがありません。上の欄に入力するか、下の候補をタップして追加してください。</li>';
+      return;
+    }
+    const clocks = plannedClocks(t);
+    list.innerHTML = t.tasks.map((x, i) => {
+      const st = S.taskStats[x.name];
+      let avg = '';
+      if (st && st.n) {
+        const a = st.sec / st.n / 60;
+        avg = `<span class="${a <= x.min ? 'avg-ok' : 'avg-over'}">実績平均 ${a < 1 ? a.toFixed(1) : Math.round(a)}分</span>`;
+      }
+      const cls = isActive() && i === R.idx ? 'current' : (isActive() && i < R.idx) || R.status === 'done' ? 'done' : '';
+      const c = clocks[i];
+      const clk = c ? `<span class="clock">${clock(c)}–${clock(new Date(+c + x.min * 60000))}</span>` : '<span>済</span>';
+      return `<li class="task ${cls}">
+        <span class="task-idx">${i + 1}</span>
+        <div class="task-main">
+          <input class="task-name" type="text" id="tn-${x.id}" value="${esc(x.name)}" data-edit-name="${i}" aria-label="${i + 1}番目のタスク名">
+          <div class="task-sub">${clk}${avg}</div>
+        </div>
+        <div class="task-ctrl">
+          <input class="task-min" type="number" id="tm-${x.id}" min="1" max="240" value="${x.min}" data-edit-min="${i}" aria-label="${i + 1}番目の分数"><span class="unit">分</span>
+          <button class="icon-btn" data-move="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="上へ">▲</button>
+          <button class="icon-btn" data-move="${i}" data-dir="1" ${i === t.tasks.length - 1 ? 'disabled' : ''} aria-label="下へ">▼</button>
+          <button class="icon-btn" data-del="${i}" aria-label="削除">✕</button>
+        </div>
+      </li>`;
+    }).join('');
+  }
+
+  function renderPresets() {
+    const names = new Set(PRESETS.map(p => p.name));
+    const recent = S.recent.filter(r => !names.has(r.name)).slice(0, 8);
+    let html = '<span class="presets-label">ワンタップで追加</span>';
+    html += recent.map(r => `<button class="preset recent" data-preset="${esc(r.name)}" data-min="${r.min}" title="最近追加したタスク">${esc(r.name)}<small>${r.min}分</small></button>`).join('');
+    html += PRESETS.map(p => `<button class="preset" data-preset="${esc(p.name)}" data-min="${p.min}">${esc(p.name)}<small>${p.min}分</small></button>`).join('');
+    $('presets').innerHTML = html;
+  }
+
+  function sampleHistory() {
+    const out = [];
+    const mins = [42, 55, 0, 60, 38, 71, 0];
+    const d = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const day = new Date(d); day.setDate(d.getDate() - i);
+      const m = mins[6 - i];
+      if (i === 0 || !m) continue;
+      out.push({ date: dayKey(day), ts: +day, tabName: '朝', plannedMin: 60, actualSec: m * 60 });
+    }
+    return out;
+  }
+
+  function renderRecords() {
+    const real = S.history.length > 0;
+    const hist = real ? S.history : sampleHistory();
+    $('sampleTag').innerHTML = real ? '' : '<span class="sample-tag">サンプル表示</span>';
+
+    const today = new Date();
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today); d.setDate(today.getDate() - i);
+      const key = dayKey(d);
+      const runs = hist.filter(h => h.date === key);
+      days.push({ d, key, runs: runs.length, min: Math.round(runs.reduce((s, h) => s + h.actualSec, 0) / 60), today: i === 0 });
+    }
+
+    // tiles
+    const doneDays = new Set(hist.map(h => h.date));
+    let streak = 0;
+    const cur = new Date(today);
+    if (!doneDays.has(dayKey(cur))) cur.setDate(cur.getDate() - 1); // today not yet done doesn't break the streak
+    while (doneDays.has(dayKey(cur))) { streak++; cur.setDate(cur.getDate() - 1); }
+    $('stStreak').innerHTML = `${streak}<small>日</small>`;
+    $('stToday').innerHTML = `${days[6].runs}<small>回</small>`;
+    const wk = days.reduce((s, d) => s + d.min, 0);
+    $('stWeek').innerHTML = wk >= 60 ? `${Math.floor(wk / 60)}<small>時間</small>${wk % 60}<small>分</small>` : `${wk}<small>分</small>`;
+
+    // chart
+    const W = 340, H = 150, L = 30, Rt = 8, T = 16, B = 24;
+    const pw = W - L - Rt, ph = H - T - B;
+    const maxV = Math.max(30, ...days.map(d => d.min));
+    const step = maxV <= 60 ? 15 : maxV <= 120 ? 30 : 60;
+    const top = Math.ceil(maxV / step) * step;
+    const y = v => T + ph - (v / top) * ph;
+    const slot = pw / 7, bw = Math.min(26, slot * 0.56);
+    let svg = '';
+    for (let v = 0; v <= top; v += step) {
+      svg += `<line class="${v === 0 ? 'base-line' : 'grid-line'}" x1="${L}" x2="${W - Rt}" y1="${y(v)}" y2="${y(v)}"/>`;
+      svg += `<text class="axis-text" x="${L - 6}" y="${y(v) + 3.5}" text-anchor="end">${v}</text>`;
+    }
+    const peak = Math.max(...days.map(d => d.min));
+    days.forEach((d, i) => {
+      const cx = L + slot * i + slot / 2;
+      const x0 = cx - bw / 2;
+      const h = Math.max(0, y(0) - y(d.min));
+      const r = Math.min(4, h);
+      const path = h > 0
+        ? `M${x0},${y(0)} V${y(d.min) + r} Q${x0},${y(d.min)} ${x0 + r},${y(d.min)} H${x0 + bw - r} Q${x0 + bw},${y(d.min)} ${x0 + bw},${y(d.min) + r} V${y(0)} Z`
+        : '';
+      svg += `<rect class="bar-hit" data-day="${i}" x="${L + slot * i}" y="${T}" width="${slot}" height="${ph + B}" tabindex="0" aria-label="${d.d.getMonth() + 1}月${d.d.getDate()}日 ${d.min}分"/>`;
+      svg += `<path class="bar ${d.today ? 'today' : ''}" d="${path}"/>`;
+      if ((d.today || (d.min === peak && peak > 0)) && d.min > 0) {
+        svg += `<text class="val-text" x="${cx}" y="${y(d.min) - 5}" text-anchor="middle">${d.min}</text>`;
+      }
+      svg += `<text class="axis-text ${d.today ? 'today' : ''}" x="${cx}" y="${H - 7}" text-anchor="middle">${d.today ? '今日' : WEEKDAYS[d.d.getDay()]}</text>`;
+    });
+    const chart = $('weekChart');
+    chart.innerHTML = svg;
+    chart._days = days;
+
+    // recent runs
+    const rows = real ? S.history.slice(-5).reverse() : [];
+    $('historyList').innerHTML = rows.map(h => {
+      const d = new Date(h.ts);
+      const diff = Math.round(h.actualSec / 60) - h.plannedMin;
+      const diffTxt = diff === 0 ? '予定どおり' : diff < 0 ? `${-diff}分 短縮` : `${diff}分 超過`;
+      return `<li><span>${d.getMonth() + 1}/${d.getDate()} ${clock(d)} 〈${esc(h.tabName)}〉</span><span>${Math.round(h.actualSec / 60)}分（${diffTxt}）</span></li>`;
+    }).join('');
+  }
+
+  function renderAll() {
+    renderTabs();
+    renderSchedule();
+    renderTasks();
+    renderTimerText();
+    renderLive();
+    renderRecords();
+    $('voiceBtn').textContent = S.voice ? '音声 ON' : '音声 OFF';
+    $('voiceBtn').setAttribute('aria-pressed', S.voice);
+    $('overBtn').textContent = S.overtime ? '時間切れ: 延長して待つ' : '時間切れ: 自動で次へ';
+    $('overBtn').setAttribute('aria-pressed', S.overtime);
+  }
+
+  // ---------- tooltip ----------
+  const tip = $('tip');
+  function showTip(html, x, y) {
+    tip.innerHTML = html; tip.hidden = false;
+    const r = tip.getBoundingClientRect();
+    let left = x + 12, top = y - r.height - 10;
+    if (left + r.width > window.innerWidth - 8) left = x - r.width - 12;
+    if (top < 8) top = y + 16;
+    tip.style.left = Math.max(8, left) + 'px'; tip.style.top = top + 'px';
+  }
+  const hideTip = () => { tip.hidden = true; };
+
+  $('segbar').addEventListener('pointermove', e => {
+    const s = e.target.closest('[data-seg]');
+    if (!s) return hideTip();
+    const t = tab(), i = +s.dataset.seg, x = t.tasks[i];
+    const c = plannedClocks(t)[i];
+    showTip(`<b>${i + 1}. ${esc(x.name)}</b><br>${x.min}分${c ? ` ・ ${clock(c)}〜` : ' ・ 完了'}`, e.clientX, e.clientY);
+  });
+  $('segbar').addEventListener('pointerleave', hideTip);
+
+  function chartTip(target, x, y) {
+    const d = $('weekChart')._days[+target.dataset.day];
+    showTip(`<b>${d.d.getMonth() + 1}月${d.d.getDate()}日（${WEEKDAYS[d.d.getDay()]}）</b><br>${d.min}分 ・ 完了 ${d.runs}回`, x, y);
+  }
+  $('weekChart').addEventListener('pointermove', e => {
+    const h = e.target.closest('[data-day]');
+    h ? chartTip(h, e.clientX, e.clientY) : hideTip();
+  });
+  $('weekChart').addEventListener('pointerleave', hideTip);
+  $('weekChart').addEventListener('focusin', e => {
+    const h = e.target.closest('[data-day]');
+    if (!h) return;
+    h.classList.add('focus');
+    const r = h.getBoundingClientRect();
+    chartTip(h, r.left + r.width / 2, r.top + 20);
+  });
+  $('weekChart').addEventListener('focusout', e => { e.target.classList && e.target.classList.remove('focus'); hideTip(); });
+
+  // ---------- events ----------
+  $('startBtn').addEventListener('click', startOrPause);
+  $('doneBtn').addEventListener('click', () => { if (isActive()) advance(false); });
+  $('resetBtn').addEventListener('click', reset);
+
+  $('voiceBtn').addEventListener('click', () => {
+    S.voice = !S.voice;
+    if (!S.voice && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    save(); renderAll();
+  });
+  $('overBtn').addEventListener('click', () => {
+    S.overtime = !S.overtime;
+    save(); renderAll();
+    message(S.overtime ? '時間切れになっても次へ進まず、「完了」を押すまで超過時間を数えます。' : '時間切れになったら自動で次のタスクへ進みます。');
+  });
+
+  $('tabs').addEventListener('click', e => {
+    const b = e.target.closest('[data-tab]');
+    if (b) {
+      if (b.dataset.tab === S.currentTabId) return;
+      if (isActive()) { message('実行中はルーティンを切り替えできません。リセットしてから切り替えてください。'); return; }
+      S.currentTabId = b.dataset.tab; confirmDelete = false;
+      reset(); save(); return;
+    }
+    if (e.target.id === 'tabAdd') { tabFormOpen = true; renderTabs(); }
+    if (e.target.id === 'tabCancel') { tabFormOpen = false; renderTabs(); }
+  });
+  $('tabs').addEventListener('submit', e => {
+    e.preventDefault();
+    const name = $('tabName').value.trim();
+    if (!name) return;
+    if (isActive()) { message('実行中はルーティンを追加できません。リセットしてから追加してください。'); return; }
+    const t = { id: uid(), name, endTime: '22:00', tasks: [] };
+    S.tabs.push(t); S.currentTabId = t.id; tabFormOpen = false;
+    save(); reset();
+  });
+
+  $('tabTools').addEventListener('click', e => {
+    if (e.target.id !== 'tabDel') return;
+    if (isActive()) { message('実行中は削除できません。'); return; }
+    if (!confirmDelete) { confirmDelete = true; renderTabs(); setTimeout(() => { confirmDelete = false; renderTabs(); }, 4000); return; }
+    S.tabs = S.tabs.filter(t => t.id !== S.currentTabId);
+    S.currentTabId = S.tabs[0].id; confirmDelete = false;
+    save(); reset();
+  });
+
+  $('endTime').addEventListener('change', e => {
+    tab().endTime = e.target.value || '00:00';
+    save(); renderAll();
+  });
+
+  function addTask(name, min) {
+    name = name.trim();
+    min = Math.max(1, Math.min(240, parseInt(min, 10) || 5));
+    if (!name) return;
+    tab().tasks.push({ id: uid(), name, min });
+    S.recent = [{ name, min }, ...S.recent.filter(r => r.name !== name)].slice(0, 12);
+    save(); renderAll();
+  }
+  $('addForm').addEventListener('submit', e => {
+    e.preventDefault();
+    addTask($('newName').value, $('newMin').value);
+    $('newName').value = '';
+    $('newName').focus();
+  });
+  $('presets').addEventListener('click', e => {
+    const b = e.target.closest('[data-preset]');
+    if (b) addTask(b.dataset.preset, b.dataset.min);
+  });
+
+  $('taskList').addEventListener('click', e => {
+    const t = tab();
+    const mv = e.target.closest('[data-move]');
+    const del = e.target.closest('[data-del]');
+    if ((mv || del) && isActive()) { message('実行中は並べ替え・削除できません。一時停止ではなくリセットしてから行ってください。'); return; }
+    if (mv) {
+      const i = +mv.dataset.move, j = i + +mv.dataset.dir;
+      [t.tasks[i], t.tasks[j]] = [t.tasks[j], t.tasks[i]];
+      save(); renderAll();
+    }
+    if (del) {
+      t.tasks.splice(+del.dataset.del, 1);
+      save(); renderAll();
+    }
+  });
+  $('taskList').addEventListener('change', e => {
+    const t = tab();
+    if (e.target.dataset.editName !== undefined) {
+      const v = e.target.value.trim();
+      if (v) t.tasks[+e.target.dataset.editName].name = v;
+    }
+    if (e.target.dataset.editMin !== undefined) {
+      const i = +e.target.dataset.editMin;
+      const v = Math.max(1, Math.min(240, parseInt(e.target.value, 10) || t.tasks[i].min));
+      if (isActive() && i === R.idx) {
+        // shift the live deadline by the change so the current countdown follows the new length
+        const delta = (v - t.tasks[i].min) * 60000;
+        if (R.status === 'running') R.endAt += delta; else R.remainingMs += delta;
+      }
+      t.tasks[i].min = v;
+    }
+    save(); renderAll();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.code !== 'Space' || /INPUT|BUTTON|TEXTAREA/.test(document.activeElement.tagName)) return;
+    e.preventDefault(); startOrPause();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && R.status === 'running') { lockScreen(); tick(); }
+  });
+
+  // keep planned clock times fresh while idle
+  setInterval(() => { if (!isActive() && document.activeElement.tagName !== 'INPUT') { renderSchedule(); renderTasks(); renderLive(); } }, 30000);
+
+  renderPresets();
+  renderAll();
+})();
+</script>
+</body>
+</html>
