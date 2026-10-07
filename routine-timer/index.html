@@ -445,8 +445,11 @@
       });
     } catch (e) { /* audio unavailable */ }
   }
+  const bridge = window.AndroidBridge; // present when running inside the Android app
   function speak(text) {
-    if (!S.voice || !('speechSynthesis' in window)) return;
+    if (!S.voice) return;
+    if (bridge) { bridge.speak(text); return; }
+    if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'ja-JP';
@@ -466,9 +469,10 @@
 
   // ---------- timer ----------
   async function lockScreen() {
+    if (bridge) { bridge.keepScreenOn(true); return; }
     try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { wakeLock = null; }
   }
-  function unlockScreen() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+  function unlockScreen() { if (bridge) bridge.keepScreenOn(false); try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
 
   function startOrPause() {
     const t = tab();
@@ -885,7 +889,7 @@
 
   $('voiceBtn').addEventListener('click', () => {
     S.voice = !S.voice;
-    if (!S.voice && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    if (!S.voice) { if (bridge) bridge.stopSpeaking(); else if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
     save(); renderAll();
   });
   $('overBtn').addEventListener('click', () => {

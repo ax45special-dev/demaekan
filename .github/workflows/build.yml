@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,3 +24,19 @@ jobs:
         with:
           name: offer-judge-apk
           path: app/build/outputs/apk/debug/*.apk
+      - run: cp routinetimer/build/outputs/apk/debug/routinetimer-debug.apk RoutineTimer.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: routine-timer-apk
+          path: RoutineTimer.apk
+      # A fixed release gives a direct download link that opens on a phone without unzipping.
+      - name: Publish routine timer release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete routine-timer-latest --yes --cleanup-tag || true
+          gh release create routine-timer-latest RoutineTimer.apk \
+            --target "${{ github.sha }}" \
+            --title "ルーティンタイマー (最新版)" \
+            --notes "ブランチ ${{ github.ref_name }} のコミット ${{ github.sha }} からビルドしたAPKです。" \
+            --prerelease
