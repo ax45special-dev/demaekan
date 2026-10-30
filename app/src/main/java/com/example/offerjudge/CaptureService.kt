@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -22,16 +23,22 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
+import android.widget.Toast
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -61,6 +68,7 @@ class CaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var overlay: TextView? = null
     private var busy = false
+    private var lastFrame: Bitmap? = null // 長押しスクショ用の最新画面
     private val settings by lazy { JudgeSettings(this) }
 
     // 現在地
@@ -146,12 +154,13 @@ class CaptureService : Service() {
             maxLines = 2
             maxWidth = (resources.displayMetrics.widthPixels * 0.95).toInt()
             setOnClickListener { toggleAccepted() }
+            setOnLongClickListener { saveScreenshot(); true }
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            // タップで「受けた」を記録する（オーバーレイの外のタッチは下のアプリに届く）
+            // タップで「受けた」を記録、長押しでスクショ保存（オーバーレイの外のタッチは下のアプリに届く）
             // SECURE: 自分の表示をキャプチャに写さない（OCRが自分の文字を読まないように）
             //   ※キャプチャ上ではこの部分が黒く抜けるので、小さく・画面上端に置く
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -207,6 +216,7 @@ class CaptureService : Service() {
         } finally {
             image.close()
         }
+        lastFrame = bmp
 
         if (isMostlyBlack(bmp)) {
             overlay?.text = "⚫ 画面が真っ黒です\n（このアプリはキャプチャ禁止の可能性）"
@@ -396,6 +406,39 @@ class CaptureService : Service() {
         try {
             OfferLog.append(this, p)
         } catch (e: Exception) {
+        }
+    }
+
+    // オーバーレイがあると端末のスクショが禁止されるので、読み取り中の画面を写真に保存する
+    // （オーバーレイ自体の部分は黒く写る）
+    private fun saveScreenshot() {
+        val bmp = lastFrame
+        if (bmp == null) {
+            Toast.makeText(this, "まだ画面を取得していません", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val name = "offer_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.JAPAN).format(Date()) + ".png"
+        geoThread.execute {
+            val msg = try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/OfferJudge")
+                    }
+                    val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                        ?: throw IllegalStateException("保存先を作れません")
+                    contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    "📷 スクショを保存しました（写真 > Pictures/OfferJudge）"
+                } else {
+                    val file = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), name)
+                    file.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    "📷 スクショを保存しました（${file.absolutePath}）"
+                }
+            } catch (e: Exception) {
+                "スクショの保存に失敗しました: ${e.message}"
+            }
+            main.post { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
         }
     }
 
