@@ -13,6 +13,15 @@ android {
         versionCode = 1
         versionName = "0.1"
     }
+    // 毎回同じ鍵で署名して、上書きインストールできるようにする（デバッグ用の鍵なので公開してよい）
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

@@ -53,6 +53,7 @@ class CaptureService : Service() {
         private const val PENDING_MS = 60_000L // オファーが消えてから「受けた」をタップできる時間
         private const val DEBUG = false        // trueにすると読み取った文字も表示
         private const val ROAD_FACTOR = 1.3    // 直線距離 → 道のりの概算倍率
+        private const val MAX_GEO_M = 20_000f  // 現在地からこれ以上離れた住所検索結果は読み間違いとみなす
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -350,7 +351,7 @@ class CaptureService : Service() {
         val rate = realPerHour ?: perHour
         val end = settings.endMinute
         val overEnd = end != null && minutes != null &&
-            minutesUntil(end).let { toEnd -> toEnd > 720 || minutes > toEnd } // 720超 = 終了時刻を過ぎている
+            minutesUntil(end).let { toEnd -> toEnd < 0 || minutes > toEnd } // マイナス = 終了時刻を過ぎている
         val (label, color) = when {
             overEnd -> "⚠${JudgeSettings.hm(end!!)}超え" to Color.argb(230, 200, 80, 0)
             rate == null -> "⚪時間不明" to Color.argb(220, 90, 90, 90)
@@ -501,7 +502,12 @@ class CaptureService : Service() {
                     @Suppress("DEPRECATION")
                     val a = Geocoder(this, Locale.JAPAN).getFromLocationName(addr, 1)?.firstOrNull()
                     val loc = a?.let { Location("geo").apply { latitude = it.latitude; longitude = it.longitude } }
-                    main.post { geoCache[addr] = loc; geoPending.remove(addr) }
+                    main.post {
+                        // 読み間違いで遠くの別の場所になったものは使わない
+                        val cur = here
+                        geoCache[addr] = if (loc != null && cur != null && cur.distanceTo(loc) > MAX_GEO_M) null else loc
+                        geoPending.remove(addr)
+                    }
                 } catch (e: Exception) {
                     main.post { geoPending.remove(addr) } // 通信エラーなどは次回やり直す
                 }
@@ -512,7 +518,8 @@ class CaptureService : Service() {
 
     private val timeRe = Regex("""(?<![0-9])([0-2]?[0-9]):([0-5][0-9])""")
 
-    private fun minutesUntil(t: Int) = ((t - JudgeSettings.nowMinute()) % 1440 + 1440) % 1440
+    // 今から時刻 t までの分数（過ぎた時刻はマイナス。-720〜719 の範囲）
+    private fun minutesUntil(t: Int) = ((t - JudgeSettings.nowMinute() + 720) % 1440 + 1440) % 1440 - 720
 
     // 地図上の「お届け」の近くにある時刻 = お届け予定（0時からの分）。
     // 見つからなければ、2時間以内で一番遅い時刻を使う
@@ -533,6 +540,7 @@ class CaptureService : Service() {
             dx * dx + dy * dy
         }
         // 「受取」の時刻より後のものだけをお届け候補にする（受取時刻を誤って使わないように）
+        // 受取時刻はもう過ぎていることもある（その場合はマイナスになる）
         val pickup = lines.firstOrNull { it.text.contains("受取") }?.boundingBox?.let { nearest(allTimes, it) }
         val cands = if (pickup == null) times
             else times.filter { minutesUntil(it.first) > minutesUntil(pickup.first) }
