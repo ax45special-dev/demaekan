@@ -53,6 +53,7 @@ class CaptureService : Service() {
         private const val PENDING_MS = 60_000L // オファーが消えてから「受けた」をタップできる時間
         private const val DEBUG = false        // trueにすると読み取った文字も表示
         private const val ROAD_FACTOR = 1.3    // 直線距離 → 道のりの概算倍率
+        private const val HANDOFF_MIN = 5      // 推定時：受け取り・受け渡しにかかる分
         private const val MAX_GEO_M = 20_000f  // 現在地からこれ以上離れた住所検索結果は読み間違いとみなす
     }
 
@@ -80,6 +81,7 @@ class CaptureService : Service() {
     // 表示中のオファー（ちらつき防止のため、一度読めた値を保持する）
     private var offerKey: String? = null
     private var deliveryAt: Int? = null // お届け時刻（0時からの分）
+    private var pickupAt: Int? = null   // 受取時刻（0時からの分）
     private var missFrames = 0
 
     // 記録：表示中のオファーと、消えた直後のオファー（タップで「受けた」にできる）
@@ -291,6 +293,7 @@ class CaptureService : Service() {
             if (offerKey != null) endOffer()
             offerKey = null
             deliveryAt = null
+            pickupAt = null
             showWaiting(if (DEBUG) flat.take(80) else null)
             return
         }
@@ -313,6 +316,7 @@ class CaptureService : Service() {
             endOffer()
             offerKey = key
             deliveryAt = null
+            pickupAt = null
             // 一瞬の読み間違いで別オファー扱いになったときは、元の記録を続けて使う
             val p = pending
             current = if (p != null && p.yen == yen && p.km == km &&
@@ -327,8 +331,7 @@ class CaptureService : Service() {
         val rec = current ?: return
         rec.frames++
         if (deliveryAt == null) deliveryAt = deliveryTime(result)
-        val minutes = deliveryAt?.let { minutesUntil(it) }?.takeIf { it in 1..180 }
-        val perHour = minutes?.let { yen * 60 / it }
+        val readMinutes = deliveryAt?.let { minutesUntil(it) }?.takeIf { it in 1..180 }
 
         // お店・お届け先
         val lines = ocrLines(result)
@@ -343,6 +346,18 @@ class CaptureService : Service() {
         val baseLoc = settings.base?.let { (lat, lng) -> Location("base").apply { latitude = lat; longitude = lng } }
         val returnKm = baseLoc?.let { b -> destAddr?.let { geocode(it) }?.let { roadKm(it, b) } }
         val returnMin = returnKm?.let { (it / settings.speedKmh * 60).toInt() }
+
+        // お届け時刻が画面で隠れて読めないときは、受取時刻・回送距離・配達距離から推定する
+        val speed = settings.speedKmh.toDouble()
+        val estimated = readMinutes == null && (pickupAt != null || deadKm != null)
+        val minutes = readMinutes ?: if (estimated) {
+            val toStore = maxOf(
+                pickupAt?.let { minutesUntil(it) } ?: 0,
+                deadKm?.let { (it / speed * 60).toInt() } ?: 0
+            )
+            toStore + (km / speed * 60).toInt() + HANDOFF_MIN
+        } else null
+        val perHour = minutes?.let { yen * 60 / it }
         val realPerHour = if (minutes != null && returnMin != null) yen * 60 / (minutes + returnMin) else null
 
         // 判定（時間帯で基準を切り替え、終了時刻を超えるなら警告）
@@ -368,19 +383,20 @@ class CaptureService : Service() {
         rec.storeAddr = storeAddr.orEmpty()
         rec.storeName = storeName.orEmpty()
         rec.destAddr = destAddr.orEmpty()
-        rec.label = label
+        rec.label = if (estimated) "$label(推定)" else label
 
         val town = storeAddr?.substringAfter("市", "")?.take(4).orEmpty()
         line1 = buildString {
             append(label)
             if (realPerHour != null) append(" 実質${realPerHour}")
             if (perHour != null) append(" 時給${perHour}")
+            if (estimated) append(" 推定")
             if (settings.isPeak(now)) append(" ピーク")
             if (town.isNotEmpty()) append(" ").append(town)
         }
         line2 = buildString {
             append("${yen}円/${km}km")
-            if (minutes != null) append(" ${minutes}分")
+            if (minutes != null) append(if (estimated) " 約${minutes}分" else " ${minutes}分")
             append(" 回送").append(kmText(deadKm, storeAddr))
             if (baseLoc != null) append(" 戻り").append(kmText(returnKm, destAddr))
             if (deadKm != null) {
@@ -542,6 +558,7 @@ class CaptureService : Service() {
         // 「受取」の時刻より後のものだけをお届け候補にする（受取時刻を誤って使わないように）
         // 受取時刻はもう過ぎていることもある（その場合はマイナスになる）
         val pickup = lines.firstOrNull { it.text.contains("受取") }?.boundingBox?.let { nearest(allTimes, it) }
+        if (pickup != null && minutesUntil(pickup.first) in -60..120) pickupAt = pickup.first
         val cands = if (pickup == null) times
             else times.filter { minutesUntil(it.first) > minutesUntil(pickup.first) }
         if (cands.isEmpty()) return null
